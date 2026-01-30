@@ -1,21 +1,12 @@
 import { Interface } from '@ethersproject/abi';
 import { DeepReadonly } from 'ts-essentials';
 import { Log, Logger } from '../../types';
-import { catchParseLogError } from '../../utils';
 import { StatefulEventSubscriber } from '../../stateful-event-subscriber';
 import { IDexHelper } from '../../dex-helper/idex-helper';
 import { PoolState } from './types';
 
 export class SeamlessProtocolEventPool extends StatefulEventSubscriber<PoolState> {
-  handlers: {
-    [event: string]: (
-      event: any,
-      state: DeepReadonly<PoolState>,
-      log: Readonly<Log>,
-    ) => DeepReadonly<PoolState> | null;
-  } = {};
-
-  logDecoder: (log: Log) => any;
+  private readonly enabled: boolean;
 
   addressesSubscribed: string[];
 
@@ -24,21 +15,14 @@ export class SeamlessProtocolEventPool extends StatefulEventSubscriber<PoolState
     protected network: number,
     protected dexHelper: IDexHelper,
     logger: Logger,
-    protected seamlessProtocolIface = new Interface(
-      '' /* TODO: Import and put here SeamlessProtocol ABI */,
-    ), // TODO: add any additional params required for event subscriber
+    // Phase 1: event pool is intentionally unused. Use an empty interface so
+    // SeamlessProtocol can be instantiated without requiring an ABI.
+    protected seamlessProtocolIface = new Interface([]), // TODO: add any additional params required for event subscriber
   ) {
-    // TODO: Add pool name
-    super(parentName, 'POOL_NAME', dexHelper, logger);
-
-    // TODO: make logDecoder decode logs that
-    this.logDecoder = (log: Log) => this.seamlessProtocolIface.parseLog(log);
-    this.addressesSubscribed = [
-      /* subscribed addresses */
-    ];
-
-    // Add handlers
-    this.handlers['myEvent'] = this.handleMyEvent.bind(this);
+    // Phase 1: explicitly disabled to avoid noisy log parsing if wired accidentally.
+    super(parentName, 'SeamlessProtocolEventPool(DISABLED)', dexHelper, logger);
+    this.enabled = false;
+    this.addressesSubscribed = [];
   }
 
   /**
@@ -51,18 +35,10 @@ export class SeamlessProtocolEventPool extends StatefulEventSubscriber<PoolState
    * @returns Updates state of the event subscriber after the log
    */
   protected processLog(
-    state: DeepReadonly<PoolState>,
-    log: Readonly<Log>,
+    _state: DeepReadonly<PoolState>,
+    _log: Readonly<Log>,
   ): DeepReadonly<PoolState> | null {
-    try {
-      const event = this.logDecoder(log);
-      if (event.name in this.handlers) {
-        return this.handlers[event.name](event, state, log);
-      }
-    } catch (e) {
-      catchParseLogError(e, this.logger);
-    }
-
+    if (!this.enabled) return null;
     return null;
   }
 
@@ -75,17 +51,8 @@ export class SeamlessProtocolEventPool extends StatefulEventSubscriber<PoolState
    * should be generated
    * @returns state of the event subscriber at blocknumber
    */
-  async generateState(blockNumber: number): Promise<DeepReadonly<PoolState>> {
-    // TODO: complete me!
-    return {};
-  }
-
-  // Its just a dummy example
-  handleMyEvent(
-    event: any,
-    state: DeepReadonly<PoolState>,
-    log: Readonly<Log>,
-  ): DeepReadonly<PoolState> | null {
-    return null;
+  async generateState(_blockNumber: number): Promise<DeepReadonly<PoolState>> {
+    // Phase 1: disabled.
+    return {} as PoolState;
   }
 }

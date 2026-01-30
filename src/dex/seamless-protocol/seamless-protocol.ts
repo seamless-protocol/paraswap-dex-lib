@@ -8,13 +8,15 @@ import {
   SimpleExchangeParam,
   PoolLiquidity,
   Logger,
+  NumberAsString,
+  DexExchangeParam,
 } from '../../types';
 import { SwapSide, Network } from '../../constants';
 import * as CALLDATA_GAS_COST from '../../calldata-gas-cost';
 import { getDexKeysWithNetwork } from '../../utils';
 import { IDex } from '../../dex/idex';
 import { IDexHelper } from '../../dex-helper/idex-helper';
-import { SeamlessProtocolData } from './types';
+import { SeamlessProtocolData, DexParams } from './types';
 import { SimpleExchange } from '../simple-exchange';
 import { SeamlessProtocolConfig } from './config';
 import { SeamlessProtocolEventPool } from './seamless-protocol-pool';
@@ -35,6 +37,7 @@ export class SeamlessProtocol
     getDexKeysWithNetwork(SeamlessProtocolConfig);
 
   logger: Logger;
+  protected config: DexParams;
 
   constructor(
     readonly network: Network,
@@ -42,6 +45,10 @@ export class SeamlessProtocol
     readonly dexHelper: IDexHelper,
   ) {
     super(dexHelper, dexKey);
+    this.config = SeamlessProtocolConfig[dexKey]?.[network];
+    if (!this.config) {
+      throw new Error(`${dexKey} config missing for network ${network}`);
+    }
     this.logger = dexHelper.getLogger(dexKey);
     this.eventPools = new SeamlessProtocolEventPool(
       dexKey,
@@ -113,20 +120,63 @@ export class SeamlessProtocol
     destToken: string,
     srcAmount: string,
     destAmount: string,
+    _data: SeamlessProtocolData,
+    _side: SwapSide,
+  ): AdapterExchangeParam {
+    throw new Error(
+      `${this.dexKey} is V6-only; getAdapterParam (V5) is not supported`,
+    );
+  }
+
+  async getDexParam(
+    srcToken: Address,
+    destToken: Address,
+    srcAmount: NumberAsString,
+    _destAmount: NumberAsString,
+    _recipient: Address,
     data: SeamlessProtocolData,
     side: SwapSide,
-  ): AdapterExchangeParam {
-    // TODO: complete me!
-    const { exchange } = data;
+  ): Promise<DexExchangeParam> {
+    if (side !== SwapSide.SELL) {
+      throw new Error(`${this.dexKey} Phase 1 supports SELL only`);
+    }
 
-    // Encode here the payload for adapter
-    const payload = '';
+    const ltKey = data.leverageToken.toLowerCase();
+    const market = this.config.marketsByLeverageToken[ltKey];
+    if (!market) {
+      throw new Error(`${this.dexKey} unknown market lt=${data.leverageToken}`);
+    }
+    if (!market.enableSellMint) {
+      throw new Error(
+        `${this.dexKey} SELL mint is disabled for lt=${data.leverageToken}`,
+      );
+    }
 
-    return {
-      targetExchange: exchange,
-      payload,
-      networkFee: '0',
-    };
+    const collateralToken = market.seamlessLeverageToken.collateralToken;
+    const leverageToken = market.seamlessLeverageToken.leverageToken;
+
+    if (
+      srcToken.toLowerCase() !== collateralToken.toLowerCase() ||
+      destToken.toLowerCase() !== leverageToken.toLowerCase()
+    ) {
+      throw new Error(
+        `${this.dexKey} Phase 1 supports only collateral->LT SELL (src=${srcToken}, dest=${destToken})`,
+      );
+    }
+
+    // Phase 1: pricing carries only one flashLoanAmount (for a specific src amount).
+    // getDexParam has no blockNumber, so we fail fast if tx-building tries to use a different srcAmount.
+    if (BigInt(srcAmount) !== data.amountIn) {
+      throw new Error(
+        `${
+          this.dexKey
+        } tx amount mismatch (srcAmount=${srcAmount} != priced amountIn=${data.amountIn.toString()})`,
+      );
+    }
+
+    // Phase 1: tx-building is intentionally not implemented yet for SeamlessProtocol. Pricing/types/config scaffolding
+    // comes first; execution wiring will be added once the onchain venue surface is finalized.
+    throw new Error(`${this.dexKey} getDexParam is not implemented yet`);
   }
 
   // This is called once before getTopPoolsForToken is

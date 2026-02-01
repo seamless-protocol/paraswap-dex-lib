@@ -159,8 +159,8 @@ describe('SeamlessProtocol', function () {
 
     // TODO: Put here token Symbol to check against
     // Don't forget to update relevant tokens in constant-e2e.ts
-    const srcTokenSymbol = 'srcTokenSymbol';
-    const destTokenSymbol = 'destTokenSymbol';
+    const srcTokenSymbol = 'wstETH';
+    const destTokenSymbol = 'WSTETH-ETH-25x';
 
     const amountsForSell = [
       0n,

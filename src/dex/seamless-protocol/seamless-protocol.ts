@@ -11,7 +11,7 @@ import {
   NumberAsString,
   DexExchangeParam,
 } from '../../types';
-import { SwapSide, Network } from '../../constants';
+import { SwapSide, Network, UNLIMITED_USD_LIQUIDITY } from '../../constants';
 import * as CALLDATA_GAS_COST from '../../calldata-gas-cost';
 import { getDexKeysWithNetwork } from '../../utils';
 import { IDex } from '../../dex/idex';
@@ -194,8 +194,50 @@ export class SeamlessProtocol
     tokenAddress: Address,
     limit: number,
   ): Promise<PoolLiquidity[]> {
-    //TODO: complete me!
-    return [];
+    const token = tokenAddress.toLowerCase();
+
+    const pools: PoolLiquidity[] = [];
+
+    for (const market of Object.values(this.config.marketsByLeverageToken)) {
+      const lt = market.seamlessLeverageToken.leverageToken.toLowerCase();
+      const collateral =
+        market.seamlessLeverageToken.collateralToken.toLowerCase();
+
+      // If token is collateral, it may map to multiple leverage tokens.
+      if (token === collateral) {
+        pools.push({
+          exchange: this.dexKey,
+          address: market.seamlessLeverageToken.leverageToken,
+          connectorTokens: [
+            {
+              address: market.seamlessLeverageToken.leverageToken,
+              decimals: 18,
+              liquidityUSD: UNLIMITED_USD_LIQUIDITY,
+            },
+          ],
+          liquidityUSD: UNLIMITED_USD_LIQUIDITY,
+        });
+        continue;
+      }
+
+      // If token is the leverage token, it maps to exactly one collateral token.
+      if (token === lt) {
+        pools.push({
+          exchange: this.dexKey,
+          address: market.seamlessLeverageToken.leverageToken,
+          connectorTokens: [
+            {
+              address: market.seamlessLeverageToken.collateralToken,
+              decimals: 18,
+              liquidityUSD: UNLIMITED_USD_LIQUIDITY,
+            },
+          ],
+          liquidityUSD: UNLIMITED_USD_LIQUIDITY,
+        });
+      }
+    }
+
+    return pools.slice(0, limit);
   }
 
   // This is optional function in case if your implementation has acquired any resources

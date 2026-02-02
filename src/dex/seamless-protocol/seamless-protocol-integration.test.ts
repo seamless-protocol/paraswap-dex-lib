@@ -4,7 +4,7 @@ dotenv.config();
 
 import { Interface, Result } from '@ethersproject/abi';
 import { DummyDexHelper } from '../../dex-helper/index';
-import { Network, SwapSide } from '../../constants';
+import { Network, SwapSide, UNLIMITED_USD_LIQUIDITY } from '../../constants';
 import { BI_POWS } from '../../bigint-constants';
 import { SeamlessProtocol } from './seamless-protocol';
 import {
@@ -15,6 +15,7 @@ import {
 import { Tokens } from '../../../tests/constants-e2e';
 import { SeamlessProtocolConfig } from './config';
 import LEVERAGE_ROUTER_ABI from '../../abi/seamless-protocol/LeverageRouter.json';
+import { formatUnits } from '@ethersproject/units';
 
 /*
   README
@@ -94,7 +95,11 @@ async function testPricingOnNetwork(
   side: SwapSide,
   amounts: bigint[],
   leverageRouterAddress: string,
-) {
+): Promise<{
+  poolIdentifier: string;
+  prices: bigint[];
+  flashLoanAmount: bigint;
+}> {
   const pools = await seamlessProtocol.getPoolIdentifiers(
     srcToken,
     destToken,
@@ -127,6 +132,16 @@ async function testPricingOnNetwork(
     poolPrices![0].prices,
     amounts,
   );
+
+  const flashLoanAmount = poolPrices![0].data.flashLoanAmount;
+  const poolIdentifier = poolPrices![0].poolIdentifiers?.[0];
+  expect(poolIdentifier).toBeDefined();
+
+  return {
+    poolIdentifier: poolIdentifier!,
+    prices: poolPrices![0].prices,
+    flashLoanAmount,
+  };
 }
 
 describe('SeamlessProtocol', function () {
@@ -143,6 +158,24 @@ describe('SeamlessProtocol', function () {
     const tokensByAddress = new Map(
       Object.values(tokens).map(t => [t.address.toLowerCase(), t]),
     );
+    const tokenSymbolByAddress = new Map(
+      Object.entries(tokens).map(([symbol, token]) => [
+        token.address.toLowerCase(),
+        symbol,
+      ]),
+    );
+
+    const getTokenSymbol = (address: string) =>
+      tokenSymbolByAddress.get(address.toLowerCase()) ?? 'N/A';
+
+    const formatLiquidityUSD = (liquidityUSD: number | string) => {
+      const numeric =
+        typeof liquidityUSD === 'string' ? Number(liquidityUSD) : liquidityUSD;
+      if (Number.isFinite(numeric) && numeric === UNLIMITED_USD_LIQUIDITY) {
+        return `${liquidityUSD}(unlimited)`;
+      }
+      return `${liquidityUSD}`;
+    };
 
     // TODO: Put here token Symbol to check against
     // Don't forget to update relevant tokens in constant-e2e.ts
@@ -185,7 +218,41 @@ describe('SeamlessProtocol', function () {
       }
     });
 
-    it('getPoolIdentifiers and getPricesVolume SELL (all configured markets)', async function () {
+    it('1. Check Markets Mainnet', async () => {
+      const markets = Object.values(marketConfig.marketsByLeverageToken);
+      console.log(`SeamlessProtocol markets configured: ${markets.length}`);
+
+      const rows = markets.map(market => {
+        const lt = market.seamlessLeverageToken.leverageToken;
+        const collateral = market.seamlessLeverageToken.collateralToken;
+        const debt = market.seamlessLeverageToken.debtToken;
+
+        return {
+          ltSymbol: getTokenSymbol(lt),
+          lt,
+          collateralSymbol: getTokenSymbol(collateral),
+          collateral,
+          debtSymbol: getTokenSymbol(debt),
+          debt,
+          enableSellMint: market.enableSellMint,
+          enableSellRedeem: market.enableSellRedeem ?? false,
+        };
+      });
+
+      console.table(rows);
+
+      expect(markets.length).toBeGreaterThan(0);
+    });
+
+    it('3. Check Sell Prices (all configured markets)', async function () {
+      const formatAmount = (amount: bigint, decimals: number) => {
+        // `formatUnits(1e18, 18)` => "1.0" (trim to "1")
+        const formatted = formatUnits(amount.toString(), decimals);
+        return formatted.replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+      };
+
+      const metaRows: Array<Record<string, unknown>> = [];
+
       for (const market of Object.values(marketConfig.marketsByLeverageToken)) {
         if (!market.enableSellMint) continue;
 
@@ -196,6 +263,10 @@ describe('SeamlessProtocol', function () {
         const leverageToken =
           tokensByAddress.get(
             market.seamlessLeverageToken.leverageToken.toLowerCase(),
+          ) ?? null;
+        const debtToken =
+          tokensByAddress.get(
+            market.seamlessLeverageToken.debtToken.toLowerCase(),
           ) ?? null;
 
         expect(collateralToken).not.toBeNull();
@@ -219,7 +290,7 @@ describe('SeamlessProtocol', function () {
         const leverageRouterAddress = market.seamlessPeriphery.leverageRouter;
         expect(leverageRouterAddress).toBeDefined();
 
-        await testPricingOnNetwork(
+        const pricingSummary = await testPricingOnNetwork(
           seamlessProtocol,
           network,
           dexKey,
@@ -230,12 +301,61 @@ describe('SeamlessProtocol', function () {
           sellAmounts,
           leverageRouterAddress!,
         );
+
+        const ltSymbol = getTokenSymbol(
+          market.seamlessLeverageToken.leverageToken,
+        );
+        const collateralSymbol = getTokenSymbol(
+          market.seamlessLeverageToken.collateralToken,
+        );
+        const debtSymbol = getTokenSymbol(
+          market.seamlessLeverageToken.debtToken,
+        );
+
+        // Print a per-amount curve table for this market
+        const marketCurveRows = sellAmounts.map((amountIn, idx) => {
+          const amountOut = pricingSummary.prices[idx] ?? 0n;
+          return {
+            amountIn: formatAmount(amountIn, collateralToken!.decimals),
+            amountOut: formatAmount(amountOut, leverageToken!.decimals),
+          };
+        });
+
+        console.log(`SELL curve: ${collateralSymbol} -> ${ltSymbol}`);
+        console.table(marketCurveRows);
+
+        // Meta summary row (full amount only)
+        const fullAmountIn = sellAmounts[sellAmounts.length - 1] ?? 0n;
+        const fullAmountOut =
+          pricingSummary.prices[sellAmounts.length - 1] ?? 0n;
+        metaRows.push({
+          ltSymbol,
+          collateralSymbol,
+          debtSymbol,
+          amountIn: formatAmount(fullAmountIn, collateralToken!.decimals),
+          amountOut: formatAmount(fullAmountOut, leverageToken!.decimals),
+          flashLoanAmount:
+            debtToken === null
+              ? pricingSummary.flashLoanAmount.toString()
+              : formatAmount(
+                  pricingSummary.flashLoanAmount,
+                  debtToken.decimals,
+                ),
+          poolIdentifier: pricingSummary.poolIdentifier,
+        });
       }
+
+      console.log('SELL per-market summary (full amount only).');
+      console.table(metaRows);
     });
 
-    it('getPoolIdentifiers and getPricesVolume BUY (Phase 1: unsupported)', async function () {
+    it('4. Check Buy Prices (Phase 1: unsupported)', async function () {
       const src = tokens[srcTokenSymbol];
       const dest = tokens[destTokenSymbol];
+
+      console.log(
+        `Phase 1: BUY unsupported. Verifying getPoolIdentifiers=[] and getPricesVolume=null for ${srcTokenSymbol} -> ${destTokenSymbol} at block ${blockNumber}`,
+      );
 
       const pools = await seamlessProtocol.getPoolIdentifiers(
         src,
@@ -255,7 +375,7 @@ describe('SeamlessProtocol', function () {
       expect(poolPrices).toBeNull();
     });
 
-    it('getTopPoolsForToken (collateral token)', async function () {
+    it('2. Check Top Pools for Tokens (collateral token)', async function () {
       // We have to check without calling initializePricing, because
       // pool-tracker is not calling that function
       const newSeamlessProtocol = new SeamlessProtocol(
@@ -270,7 +390,20 @@ describe('SeamlessProtocol', function () {
         tokens[srcTokenSymbol].address,
         10,
       );
-      console.log(`${srcTokenSymbol} Top Pools:`, poolLiquidity);
+
+      console.log(`${srcTokenSymbol} Top Pools:`);
+      console.dir(poolLiquidity, { depth: null });
+      console.table(
+        poolLiquidity.map(p => ({
+          poolSymbol: getTokenSymbol(p.address),
+          poolAddress: p.address,
+          connectorSymbols: p.connectorTokens
+            .map(t => getTokenSymbol(t.address))
+            .join('\n'),
+          connectorAddresses: p.connectorTokens.map(t => t.address).join('\n'),
+          liquidityUSD: formatLiquidityUSD(p.liquidityUSD),
+        })),
+      );
 
       if (!newSeamlessProtocol.hasConstantPriceLargeAmounts) {
         checkPoolsLiquidity(
@@ -281,7 +414,7 @@ describe('SeamlessProtocol', function () {
       }
     });
 
-    it('getTopPoolsForToken (leverage token)', async function () {
+    it('2. Check Top Pools for Tokens (leverage token)', async function () {
       const newSeamlessProtocol = new SeamlessProtocol(
         network,
         dexKey,
@@ -290,6 +423,20 @@ describe('SeamlessProtocol', function () {
       const poolLiquidity = await newSeamlessProtocol.getTopPoolsForToken(
         tokens[destTokenSymbol].address,
         10,
+      );
+
+      console.log(`${destTokenSymbol} Top Pools:`);
+      console.dir(poolLiquidity, { depth: null });
+      console.table(
+        poolLiquidity.map(p => ({
+          poolSymbol: getTokenSymbol(p.address),
+          poolAddress: p.address,
+          connectorSymbols: p.connectorTokens
+            .map(t => getTokenSymbol(t.address))
+            .join('\n'),
+          connectorAddresses: p.connectorTokens.map(t => t.address).join('\n'),
+          liquidityUSD: formatLiquidityUSD(p.liquidityUSD),
+        })),
       );
 
       expect(poolLiquidity.length).toBeGreaterThan(0);
@@ -304,7 +451,7 @@ describe('SeamlessProtocol', function () {
       });
     });
 
-    it('getTopPoolsForToken (no pools for token)', async function () {
+    it('2. Check Top Pools for Tokens (no pools for token)', async function () {
       const newSeamlessProtocol = new SeamlessProtocol(
         network,
         dexKey,
@@ -316,6 +463,8 @@ describe('SeamlessProtocol', function () {
         tokens.WETH.address,
         10,
       );
+
+      console.log(`WETH Top Pools (expected empty):`, poolLiquidity);
       expect(poolLiquidity).toEqual([]);
     });
   });

@@ -45,7 +45,7 @@ liquidity entries driven by static market config:
 - If `token` is an **LT token**, return the corresponding market (connector token is the collateral).
 - Otherwise, return `[]`.
 
-Execution is planned in two gates:
+Execution is planned in multiple Gates:
 
 - **Gate 0:** validate internal swapCalls encoding end-to-end using the existing `LeverageRouter.deposit(...)` surface.
   This is useful for proving the internal leverage swap calldata and `flashLoanAmount` sizing, but it is not a real
@@ -103,9 +103,42 @@ yarn test src/dex/seamless-protocol/seamless-protocol-e2e.test.ts
 yarn test src/dex/seamless-protocol/seamless-protocol-events.test.ts
 
 # Focused tests
-yarn test src/dex/seamless-protocol/seamless-protocol-integration.test.ts -t 'getPoolIdentifiers and getPricesVolume SELL'
-yarn test src/dex/seamless-protocol/seamless-protocol-integration.test.ts -t 'getTopPoolsForToken'
+yarn test src/dex/seamless-protocol/seamless-protocol-integration.test.ts -t "1. Check Markets Mainnet"
+yarn test src/dex/seamless-protocol/seamless-protocol-integration.test.ts -t "2. Check Top Pools for Tokens"
+yarn test src/dex/seamless-protocol/seamless-protocol-integration.test.ts -t "3. Check Sell Prices"
+yarn test src/dex/seamless-protocol/seamless-protocol-integration.test.ts -t "4. Check Buy Prices"
 
 # Gate 1 E2E (wrapper; should succeed)
 yarn test src/dex/seamless-protocol/seamless-protocol-e2e.test.ts
 ```
+
+## Mapping Phases to Tests
+
+### Checking Market Configuration
+
+`yarn test src/dex/seamless-protocol/seamless-protocol-integration.test.ts -t "1. Check Markets Mainnet"`
+
+### Checking Price Quoting
+
+### Checking Collateral to Leverage Token
+
+### Checking Any Token to Leverage Token
+
+### Checking Leverage Token to Collateral Token
+
+### Checking Any Token to Collateral Token (via LT)
+
+### Checking Event Driven Market Updates
+
+```bash
+yarn test src/dex/seamless-protocol/seamless-protocol-integration.test.ts -t "1. Check Markets Mainnet"
+yarn test src/dex/seamless-protocol/seamless-protocol-integration.test.ts -t "2. Check Top Pools for Tokens"
+yarn test src/dex/seamless-protocol/seamless-protocol-integration.test.ts -t "3. Check Sell Prices"
+yarn test src/dex/seamless-protocol/seamless-protocol-integration.test.ts -t "4. Check Buy Prices"
+yarn test src/dex/seamless-protocol/seamless-protocol-e2e.test.ts -t "1. Check Swap CollateralToken to LeverageToken: wstETH to WSTETH-ETH-25x"
+yarn test src/dex/seamless-protocol/seamless-protocol-e2e.test.ts -t "2. Check Swap LeverageToken to CollateralToken: WSTETH-ETH-25x to wstETH"
+yarn test src/dex/seamless-protocol/seamless-protocol-e2e.test.ts -t "3. Check Swap AnyToken to LeverageToken: USDC to WSTETH-ETH-25x"
+yarn test src/dex/seamless-protocol/seamless-protocol-events.test.ts -t "1. Check New Token Published Event"
+```
+
+UNLIMITED_USD_LIQUIDITY is a hardcoded constant (1234567890)

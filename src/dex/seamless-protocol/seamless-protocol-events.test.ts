@@ -65,6 +65,10 @@ const hasEventsToTest = Object.keys(eventsToTest).length > 0;
 
 if (!hasEventsToTest) {
   describe('SeamlessProtocol EventPool (Phase 1 disabled)', () => {
+    it.skip('1. Check New Token Published Event', () => {
+      // Phase 1: EventPool is intentionally disabled.
+      // Phase 2+: add Seamless-specific event mappings and implement fetchPoolState.
+    });
     it('has no configured event tests', () => {
       expect(hasEventsToTest).toBe(false);
     });

@@ -37,6 +37,14 @@ describe('SeamlessProtocol E2E', () => {
   describe('Mainnet', () => {
     const network = Network.MAINNET;
     const tokens = Tokens[network];
+    const tokenSymbolByAddress = new Map(
+      Object.entries(tokens).map(([symbol, token]) => [
+        token.address.toLowerCase(),
+        symbol,
+      ]),
+    );
+    const getTokenSymbol = (address: string) =>
+      tokenSymbolByAddress.get(address.toLowerCase()) ?? 'N/A';
 
     jest.setTimeout(120 * 1000);
 
@@ -65,6 +73,33 @@ describe('SeamlessProtocol E2E', () => {
       return runtimeBytecode;
     };
 
+    const logRouteSummary = (title: string, priceRoute: any) => {
+      const swaps = priceRoute?.bestRoute?.[0]?.swaps ?? [];
+      console.log(title);
+      console.table(
+        swaps.map((swap: any, idx: number) => {
+          const totalSrc = (swap.swapExchanges ?? []).reduce(
+            (acc: bigint, se: any) => acc + BigInt(se.srcAmount ?? '0'),
+            0n,
+          );
+          const totalDest = (swap.swapExchanges ?? []).reduce(
+            (acc: bigint, se: any) => acc + BigInt(se.destAmount ?? '0'),
+            0n,
+          );
+          return {
+            idx,
+            srcSymbol: getTokenSymbol(swap.srcToken),
+            destSymbol: getTokenSymbol(swap.destToken),
+            totalSrcAmount: totalSrc.toString(),
+            totalDestAmount: totalDest.toString(),
+            exchanges: (swap.swapExchanges ?? [])
+              .map((se: any) => se.exchange)
+              .join(', '),
+          };
+        }),
+      );
+    };
+
     async function simulateE2E(
       srcSymbol: string,
       destSymbol: string,
@@ -87,6 +122,10 @@ describe('SeamlessProtocol E2E', () => {
       );
 
       console.log('Price Route:', stringifyWithBigInt(priceRoute));
+      logRouteSummary(
+        `Route summary: ${srcSymbol} -> ${destSymbol} (SELL)`,
+        priceRoute,
+      );
 
       const tenderlySimulator = TenderlySimulator.getInstance();
       const userAddress = TenderlySimulator.DEFAULT_OWNER;
@@ -149,6 +188,17 @@ describe('SeamlessProtocol E2E', () => {
         stateOverride,
       };
 
+      console.log('Simulation summary:', {
+        from: simulationRequest.from,
+        to: simulationRequest.to,
+        blockNumber: simulationRequest.blockNumber,
+        srcSymbol,
+        destSymbol,
+        srcAmount: priceRoute.srcAmount,
+        destAmount: priceRoute.destAmount,
+        wrapperInjectedAt: LEVERAGE_ROUTER_RECIPIENT_WRAPPER,
+      });
+
       const { simulation } = await tenderlySimulator.simulateTransaction(
         simulationRequest,
       );
@@ -183,11 +233,16 @@ describe('SeamlessProtocol E2E', () => {
       return acc;
     };
 
-    it('wstETH -> WSTETH-ETH-25x (Gate 1 wrapper)', async () => {
+    it('1. Check Swap CollateralToken to LeverageToken: wstETH to WSTETH-ETH-25x', async () => {
       await simulateE2E('wstETH', 'WSTETH-ETH-25x', 10n ** 19n);
     });
 
-    it('USDC -> wstETH -> WSTETH-ETH-25x (Gate 1 wrapper)', async () => {
+    it.skip('2. Check Swap LeverageToken to CollateralToken: WSTETH-ETH-25x to wstETH', async () => {
+      // Phase 1: redeem leg is not yet implemented. Once supported, this should build a SELL route
+      // LT -> collateral using the Seamless venue module and validate the per-leg `recipient` semantics.
+    });
+
+    it('3. Check Swap AnyToken to LeverageToken: USDC to WSTETH-ETH-25x', async () => {
       const tenderlySimulator = TenderlySimulator.getInstance();
       const userAddress = TenderlySimulator.DEFAULT_OWNER;
       const stateOverride: StateOverride = {};
@@ -315,6 +370,10 @@ describe('SeamlessProtocol E2E', () => {
       };
 
       console.log('Composed Price Route:', stringifyWithBigInt(composedRoute));
+      logRouteSummary(
+        'Composed route summary: USDC -> ... -> wstETH -> WSTETH-ETH-25x (SELL)',
+        composedRoute,
+      );
       console.log('Composed Route addresses:', {
         contractAddress: composedRoute.contractAddress,
         tokenTransferProxy: composedRoute.tokenTransferProxy,

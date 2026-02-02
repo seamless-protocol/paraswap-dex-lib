@@ -18,7 +18,9 @@ export class PromiseScheduler {
 
   private async run() {
     if (this.promises.length === 0) {
-      setTimeout(this.run.bind(this), this.intervalMs);
+      // This scheduler is a background helper; it should not keep Node alive by itself (tests, one-off scripts, etc).
+      const timer = setTimeout(this.run.bind(this), this.intervalMs);
+      timer.unref();
       return;
     }
     this.logger.info(
@@ -46,7 +48,8 @@ export class PromiseScheduler {
           this.logger.info(
             `async parallel done on ${promisesToExecute.length} promises`,
           );
-          setTimeout(this.run.bind(this), this.intervalMs);
+          const timer = setTimeout(this.run.bind(this), this.intervalMs);
+          timer.unref();
         }
       };
     });

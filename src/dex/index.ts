@@ -97,6 +97,7 @@ import { UsdcTransmuter } from './usdc-transmuter/usdc-transmuter';
 import { Blackhole } from './solidly/forks-override/blackhole';
 import { BlackholeCL } from './algebra-integral/forks/blackhole-cl';
 import { Cap } from './cap/cap';
+import { SeamlessProtocol } from './seamless-protocol/seamless-protocol';
 
 const LegacyDexes = [
   CurveV2,
@@ -184,6 +185,7 @@ const Dexes = [
   AaveV3PtRollOver,
   RingV2,
   UsdcTransmuter,
+  SeamlessProtocol,
   Blackhole,
   BlackholeCL,
   Cap,

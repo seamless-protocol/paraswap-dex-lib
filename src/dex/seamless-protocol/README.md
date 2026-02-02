@@ -29,16 +29,34 @@ doesn’t fit the multicall sweep + dust invariants and creates a brittle call g
 Phase 1 scope is intentionally narrow and SELL/mint-first:
 
 - The module advertises pools only for **SELL collateral → LT** (mint-like leg).
+- Pool identifier format (normative): `${dexKey}_${ltAddressLower}` (e.g. `SeamlessProtocol_0x...`).
+- BUY is intentionally unsupported in Phase 1 (pool discovery returns `[]`, pricing returns `null`).
 - Quoting uses Seamless protocol previews (Phase 1: `LeverageRouter.previewDeposit`) and carries the derived
   `flashLoanAmount` forward into tx-building because `getDexParam` does not receive `blockNumber`.
+
+**Top pools behavior (`getTopPoolsForToken`)**
+
+DexLib requires `getTopPoolsForToken(token, limit)` so the pool tracker/pathfinder can discover liquidity candidates.
+For SeamlessProtocol, there is no AMM pool; we treat each LT market as a “pool” and return synthetic “infinite”
+liquidity entries driven by static market config:
+
+- If `token` is a **collateral token**, return all configured LT markets that use that collateral (connector token is
+  the LT).
+- If `token` is an **LT token**, return the corresponding market (connector token is the collateral).
+- Otherwise, return `[]`.
 
 Execution is planned in two gates:
 
 - **Gate 0:** validate internal swapCalls encoding end-to-end using the existing `LeverageRouter.deposit(...)` surface.
   This is useful for proving the internal leverage swap calldata and `flashLoanAmount` sizing, but it is not a real
-  ParaSwap venue leg (no explicit receiver, no return value for `returnAmountPos`).
-- **Gate 1:** switch to a dedicated `LeverageDexRouter` venue surface (collateral↔LT only) once deployed, so ParaSwap can
-  treat Seamless as a real DEX leg (explicit receiver/refundRecipient, primary output returned as first return value).
+  ParaSwap venue leg (no explicit receiver, no return value for `returnAmountPos`). In practice Gate 0 must be executed
+  as a **non-recipient-aware** venue: `LeverageRouter.deposit(...)` always mints to `msg.sender` and returns no amount,
+  so it cannot satisfy ParaSwap V6 “per-leg recipient + returnAmountPos” expectations for a venue leg.
+- **Gate 1 (Phase 1 workaround):** call a thin wrapper contract (`LeverageRouterRecipientWrapper`) as the venue target.
+  It calls `LeverageRouter.deposit(...)` and then (a) forwards minted LT shares to the per-leg `recipient`, and (b)
+  returns `sharesOut` as the first return value (`returnAmountPos=0`).
+  - In E2E tests, we inject the wrapper bytecode via Tenderly `stateOverride.code` (no onchain deployment needed).
+  - Long-term, this wrapper is replaced by a dedicated `LeverageDexRouter` surface.
 
 ## Getting Started
 
@@ -69,8 +87,11 @@ Implementation notes:
 
 ## Testing
 
-This module follows the standard DexLib test structure (integration / events / e2e). In Phase 1 the E2E and event tests
-are still scaffolded; integration tests are used to validate the IDex surface (pool discovery, pricing, top pools).
+This module follows the standard DexLib test structure (integration / events / e2e). In Phase 1:
+
+- Integration tests validate pool discovery, pricing, and `getTopPoolsForToken`.
+- EventPool tests are intentionally skipped (EventPool disabled).
+- E2E tests execute the Gate 1 wrapper flow and assert the Tenderly simulation succeeds (recipient wiring + returnAmountPos).
 
 ```bash
 # All integration tests for this DEX module
@@ -85,6 +106,6 @@ yarn test src/dex/seamless-protocol/seamless-protocol-events.test.ts
 yarn test src/dex/seamless-protocol/seamless-protocol-integration.test.ts -t 'getPoolIdentifiers and getPricesVolume SELL'
 yarn test src/dex/seamless-protocol/seamless-protocol-integration.test.ts -t 'getTopPoolsForToken'
 
-# E2E is still template-scaffolded (placeholders). Run the suite (or update template tokens first).
-yarn test src/dex/seamless-protocol/seamless-protocol-e2e.test.ts -t 'SeamlessProtocol E2E'
+# Gate 1 E2E (wrapper; should succeed)
+yarn test src/dex/seamless-protocol/seamless-protocol-e2e.test.ts
 ```

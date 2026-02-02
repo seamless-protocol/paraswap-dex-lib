@@ -13,6 +13,8 @@ import {
   checkConstantPoolPrices,
 } from '../../../tests/utils';
 import { Tokens } from '../../../tests/constants-e2e';
+import { SeamlessProtocolConfig } from './config';
+import LEVERAGE_ROUTER_ABI from '../../abi/seamless-protocol/LeverageRouter.json';
 
 /*
   README
@@ -32,50 +34,42 @@ import { Tokens } from '../../../tests/constants-e2e';
 function getReaderCalldata(
   exchangeAddress: string,
   readerIface: Interface,
+  leverageToken: string,
   amounts: bigint[],
   funcName: string,
-  // TODO: Put here additional arguments you need
 ) {
   return amounts.map(amount => ({
     target: exchangeAddress,
     callData: readerIface.encodeFunctionData(funcName, [
-      // TODO: Put here additional arguments to encode them
-      amount,
+      leverageToken,
+      amount.toString(),
     ]),
   }));
 }
 
-function decodeReaderResult(
-  results: Result,
-  readerIface: Interface,
-  funcName: string,
-) {
-  // TODO: Adapt this function for your needs
+function decodeReaderResult(results: Result, readerIface: Interface) {
   return results.map(result => {
-    const parsed = readerIface.decodeFunctionResult(funcName, result);
-    return BigInt(parsed[0]._hex);
+    const parsed = readerIface.decodeFunctionResult('previewDeposit', result);
+    const preview = parsed[0];
+    return BigInt(preview.shares.toString());
   });
 }
 
 async function checkOnChainPricing(
   seamlessProtocol: SeamlessProtocol,
-  funcName: string,
+  leverageRouterAddress: string,
+  leverageToken: string,
   blockNumber: number,
   prices: bigint[],
   amounts: bigint[],
 ) {
-  const exchangeAddress = ''; // TODO: Put here the real exchange address
-
-  // TODO: Replace dummy interface with the real one
-  // Normally you can get it from seamlessProtocol.Iface or from eventPool.
-  // It depends on your implementation
-  const readerIface = new Interface('');
-
+  const readerIface = new Interface(LEVERAGE_ROUTER_ABI);
   const readerCallData = getReaderCalldata(
-    exchangeAddress,
+    leverageRouterAddress,
     readerIface,
+    leverageToken,
     amounts.slice(1),
-    funcName,
+    'previewDeposit',
   );
   const readerResult = (
     await seamlessProtocol.dexHelper.multiContract.methods
@@ -84,7 +78,7 @@ async function checkOnChainPricing(
   ).returnData;
 
   const expectedPrices = [0n].concat(
-    decodeReaderResult(readerResult, readerIface, funcName),
+    decodeReaderResult(readerResult, readerIface),
   );
 
   expect(prices).toEqual(expectedPrices);
@@ -95,40 +89,28 @@ async function testPricingOnNetwork(
   network: Network,
   dexKey: string,
   blockNumber: number,
-  srcTokenSymbol: string,
-  destTokenSymbol: string,
+  srcToken: { address: string; decimals: number },
+  destToken: { address: string; decimals: number },
   side: SwapSide,
   amounts: bigint[],
-  funcNameToCheck: string,
+  leverageRouterAddress: string,
 ) {
-  const networkTokens = Tokens[network];
-
   const pools = await seamlessProtocol.getPoolIdentifiers(
-    networkTokens[srcTokenSymbol],
-    networkTokens[destTokenSymbol],
+    srcToken,
+    destToken,
     side,
     blockNumber,
   );
-  console.log(
-    `${srcTokenSymbol} <> ${destTokenSymbol} Pool Identifiers: `,
-    pools,
-  );
-
   expect(pools.length).toBeGreaterThan(0);
 
   const poolPrices = await seamlessProtocol.getPricesVolume(
-    networkTokens[srcTokenSymbol],
-    networkTokens[destTokenSymbol],
+    srcToken,
+    destToken,
     amounts,
     side,
     blockNumber,
     pools,
   );
-  console.log(
-    `${srcTokenSymbol} <> ${destTokenSymbol} Pool Prices: `,
-    poolPrices,
-  );
-
   expect(poolPrices).not.toBeNull();
   if (seamlessProtocol.hasConstantPriceLargeAmounts) {
     checkConstantPoolPrices(poolPrices!, amounts, dexKey);
@@ -139,7 +121,8 @@ async function testPricingOnNetwork(
   // Check if onchain pricing equals to calculated ones
   await checkOnChainPricing(
     seamlessProtocol,
-    funcNameToCheck,
+    leverageRouterAddress,
+    destToken.address,
     blockNumber,
     poolPrices![0].prices,
     amounts,
@@ -156,6 +139,10 @@ describe('SeamlessProtocol', function () {
     const dexHelper = new DummyDexHelper(network);
 
     const tokens = Tokens[network];
+    const marketConfig = SeamlessProtocolConfig[dexKey][network];
+    const tokensByAddress = new Map(
+      Object.values(tokens).map(t => [t.address.toLowerCase(), t]),
+    );
 
     // TODO: Put here token Symbol to check against
     // Don't forget to update relevant tokens in constant-e2e.ts
@@ -198,35 +185,77 @@ describe('SeamlessProtocol', function () {
       }
     });
 
-    it('getPoolIdentifiers and getPricesVolume SELL', async function () {
-      await testPricingOnNetwork(
-        seamlessProtocol,
-        network,
-        dexKey,
-        blockNumber,
-        srcTokenSymbol,
-        destTokenSymbol,
-        SwapSide.SELL,
-        amountsForSell,
-        '', // TODO: Put here proper function name to check pricing
-      );
+    it('getPoolIdentifiers and getPricesVolume SELL (all configured markets)', async function () {
+      for (const market of Object.values(marketConfig.marketsByLeverageToken)) {
+        if (!market.enableSellMint) continue;
+
+        const collateralToken =
+          tokensByAddress.get(
+            market.seamlessLeverageToken.collateralToken.toLowerCase(),
+          ) ?? null;
+        const leverageToken =
+          tokensByAddress.get(
+            market.seamlessLeverageToken.leverageToken.toLowerCase(),
+          ) ?? null;
+
+        expect(collateralToken).not.toBeNull();
+        expect(leverageToken).not.toBeNull();
+
+        const unit = BI_POWS[collateralToken!.decimals];
+        const sellAmounts = [
+          0n,
+          1n * unit,
+          2n * unit,
+          3n * unit,
+          4n * unit,
+          5n * unit,
+          6n * unit,
+          7n * unit,
+          8n * unit,
+          9n * unit,
+          10n * unit,
+        ];
+
+        const leverageRouterAddress = market.seamlessPeriphery.leverageRouter;
+        expect(leverageRouterAddress).toBeDefined();
+
+        await testPricingOnNetwork(
+          seamlessProtocol,
+          network,
+          dexKey,
+          blockNumber,
+          collateralToken!,
+          leverageToken!,
+          SwapSide.SELL,
+          sellAmounts,
+          leverageRouterAddress!,
+        );
+      }
     });
 
-    it('getPoolIdentifiers and getPricesVolume BUY', async function () {
-      await testPricingOnNetwork(
-        seamlessProtocol,
-        network,
-        dexKey,
-        blockNumber,
-        srcTokenSymbol,
-        destTokenSymbol,
+    it('getPoolIdentifiers and getPricesVolume BUY (Phase 1: unsupported)', async function () {
+      const src = tokens[srcTokenSymbol];
+      const dest = tokens[destTokenSymbol];
+
+      const pools = await seamlessProtocol.getPoolIdentifiers(
+        src,
+        dest,
         SwapSide.BUY,
-        amountsForBuy,
-        '', // TODO: Put here proper function name to check pricing
+        blockNumber,
       );
+      expect(pools).toEqual([]);
+
+      const poolPrices = await seamlessProtocol.getPricesVolume(
+        src,
+        dest,
+        amountsForBuy,
+        SwapSide.BUY,
+        blockNumber,
+      );
+      expect(poolPrices).toBeNull();
     });
 
-    it('getTopPoolsForToken', async function () {
+    it('getTopPoolsForToken (collateral token)', async function () {
       // We have to check without calling initializePricing, because
       // pool-tracker is not calling that function
       const newSeamlessProtocol = new SeamlessProtocol(
@@ -250,6 +279,44 @@ describe('SeamlessProtocol', function () {
           dexKey,
         );
       }
+    });
+
+    it('getTopPoolsForToken (leverage token)', async function () {
+      const newSeamlessProtocol = new SeamlessProtocol(
+        network,
+        dexKey,
+        dexHelper,
+      );
+      const poolLiquidity = await newSeamlessProtocol.getTopPoolsForToken(
+        tokens[destTokenSymbol].address,
+        10,
+      );
+
+      expect(poolLiquidity.length).toBeGreaterThan(0);
+      // For an LT token, it should map to exactly one market/pool.
+      expect(poolLiquidity.length).toBe(1);
+
+      // Connector token should be the collateral (and should not equal the LT itself).
+      poolLiquidity[0].connectorTokens.forEach(t => {
+        expect(t.address.toLowerCase()).not.toBe(
+          tokens[destTokenSymbol].address.toLowerCase(),
+        );
+      });
+    });
+
+    it('getTopPoolsForToken (no pools for token)', async function () {
+      const newSeamlessProtocol = new SeamlessProtocol(
+        network,
+        dexKey,
+        dexHelper,
+      );
+
+      // Use a token that is not a collateral or LT token for any Seamless market.
+      const poolLiquidity = await newSeamlessProtocol.getTopPoolsForToken(
+        tokens.WETH.address,
+        10,
+      );
+      expect(poolLiquidity).toEqual([]);
     });
   });
 });

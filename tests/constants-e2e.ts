@@ -648,6 +648,35 @@ export const Tokens: {
       address: '0x88887bE419578051FF9F4eb6C858A951921D8888',
       decimals: 18,
     },
+    // Seamless leverage tokens (LTs) + collaterals (used by SeamlessProtocol DEX tests)
+    'sUSDS-USDT-25x': {
+      address: '0xc73CE54dBC4A02D7110F69AdF123B3DbE5B3033f',
+      decimals: 18,
+    },
+    sIUSD: {
+      address: '0xDBDC1Ef57537E34680B898E1FEBD3D68c7389bCB',
+      decimals: 18,
+    },
+    'sIUSD-USDC-11x': {
+      address: '0x604d37747f3382fA51519e7542d54F1e730B97A3',
+      decimals: 18,
+    },
+    RLP: {
+      address: '0x4956b52aE2fF65D74CA2d61207523288e4528f96',
+      decimals: 18,
+    },
+    'RLP-USDC-6.75x': {
+      address: '0x6426811fF283Fa7c78F0BC5D71858c2f79c0Fc3d',
+      decimals: 18,
+    },
+    'WSTETH-ETH-25x': {
+      address: '0x10041DFFBE8fB54Ca4Dfa56F2286680EC98A37c3',
+      decimals: 18,
+    },
+    'WSTETH-WETH-2x-COW': {
+      address: '0xCE937010b7E55dA282E6161f7Aa4744A0B732035',
+      decimals: 18,
+    },
   },
   [Network.POLYGON]: {
     jGBP: {
@@ -1832,6 +1861,11 @@ export const Tokens: {
     },
     rETH: {
       address: '0xB6fe221Fe9EeF5aBa221c348bA20A1Bf5e73624c',
+      decimals: 18,
+    },
+    // Seamless leverage tokens (LTs) (used by SeamlessProtocol DEX tests)
+    'WEETH-WETH-17x': {
+      address: '0xA2fceEAe99d2cAeEe978DA27bE2d95b0381dBB8c',
       decimals: 18,
     },
   },

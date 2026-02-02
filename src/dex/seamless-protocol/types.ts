@@ -18,17 +18,14 @@ export type SeamlessProtocolData = {
 
 export type SeamlessCore = {
   leverageManager: Address;
-  // Gate 1 (preferred for pricing): thin wrapper around leverage-tokens previews.
-  // Optional until deployed/registered.
-  // seamlessLtQuoter?: Address; // seamlessLtQuoter?: Address;
 };
 
 export type SeamlessPeriphery = {
   multicallExecutor: Address;
   // Gate 0 (optional): used only for swapCalls encoding validation.
   leverageRouter?: Address;
-  // Gate 1 (required): ParaSwap venue call target.
-  // leverageDexRouter?: Address;
+  // Gate 1 (required): ParaSwap venue call target (thin wrapper around LeverageRouter with explicit recipient + return value).
+  leverageRouterRecipientWrapper?: Address;
 };
 
 export type SeamlessLeverageToken = {

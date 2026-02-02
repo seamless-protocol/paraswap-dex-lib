@@ -56,55 +56,65 @@ async function fetchPoolState(
 // eventName -> blockNumbers
 type EventMappings = Record<string, number[]>;
 
-describe('SeamlessProtocol EventPool Mainnet', function () {
-  const dexKey = 'SeamlessProtocol';
-  const network = Network.MAINNET;
-  const dexHelper = new DummyDexHelper(network);
-  const logger = dexHelper.getLogger(dexKey);
-  let seamlessProtocolPool: SeamlessProtocolEventPool;
+// poolAddress -> EventMappings
+const eventsToTest: Record<Address, EventMappings> = {
+  // TODO: Add event mappings once EventPool is enabled.
+};
 
-  // poolAddress -> EventMappings
-  const eventsToTest: Record<Address, EventMappings> = {
-    // TODO: complete me!
-  };
+const hasEventsToTest = Object.keys(eventsToTest).length > 0;
 
-  beforeEach(async () => {
-    seamlessProtocolPool = new SeamlessProtocolEventPool(
-      dexKey,
-      network,
-      dexHelper,
-      logger,
-      /* TODO: Put here additional constructor arguments if needed */
-    );
+if (!hasEventsToTest) {
+  describe('SeamlessProtocol EventPool (Phase 1 disabled)', () => {
+    it('has no configured event tests', () => {
+      expect(hasEventsToTest).toBe(false);
+    });
   });
+} else {
+  describe('SeamlessProtocol EventPool Mainnet', function () {
+    const dexKey = 'SeamlessProtocol';
+    const network = Network.MAINNET;
+    const dexHelper = new DummyDexHelper(network);
+    const logger = dexHelper.getLogger(dexKey);
+    let seamlessProtocolPool: SeamlessProtocolEventPool;
 
-  Object.entries(eventsToTest).forEach(
-    ([poolAddress, events]: [string, EventMappings]) => {
-      describe(`Events for ${poolAddress}`, () => {
-        Object.entries(events).forEach(
-          ([eventName, blockNumbers]: [string, number[]]) => {
-            describe(`${eventName}`, () => {
-              blockNumbers.forEach((blockNumber: number) => {
-                it(`State after ${blockNumber}`, async function () {
-                  await testEventSubscriber(
-                    seamlessProtocolPool,
-                    seamlessProtocolPool.addressesSubscribed,
-                    (_blockNumber: number) =>
-                      fetchPoolState(
-                        seamlessProtocolPool,
-                        _blockNumber,
-                        poolAddress,
-                      ),
-                    blockNumber,
-                    `${dexKey}_${poolAddress}`,
-                    dexHelper.provider,
-                  );
+    beforeEach(async () => {
+      seamlessProtocolPool = new SeamlessProtocolEventPool(
+        dexKey,
+        network,
+        dexHelper,
+        logger,
+        /* TODO: Put here additional constructor arguments if needed */
+      );
+    });
+
+    Object.entries(eventsToTest).forEach(
+      ([poolAddress, events]: [string, EventMappings]) => {
+        describe(`Events for ${poolAddress}`, () => {
+          Object.entries(events).forEach(
+            ([eventName, blockNumbers]: [string, number[]]) => {
+              describe(`${eventName}`, () => {
+                blockNumbers.forEach((blockNumber: number) => {
+                  it(`State after ${blockNumber}`, async function () {
+                    await testEventSubscriber(
+                      seamlessProtocolPool,
+                      seamlessProtocolPool.addressesSubscribed,
+                      (_blockNumber: number) =>
+                        fetchPoolState(
+                          seamlessProtocolPool,
+                          _blockNumber,
+                          poolAddress,
+                        ),
+                      blockNumber,
+                      `${dexKey}_${poolAddress}`,
+                      dexHelper.provider,
+                    );
+                  });
                 });
               });
-            });
-          },
-        );
-      });
-    },
-  );
-});
+            },
+          );
+        });
+      },
+    );
+  });
+}

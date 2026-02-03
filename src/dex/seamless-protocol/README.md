@@ -21,8 +21,17 @@ Velora (ParaSwap/Augustus) is an aggregator execution engine. The intended integ
 - Internally, leveraged mint/redeem still requires an **internal leverage swap** (`debtAsset ↔ collateral`) during the
   flashloan lifecycle, executed via Seamless periphery using `IMulticallExecutor.Call[]` (“swapCalls” / “leverageCalls”).
 
-In Phase 1 we avoid “nested Augustus” (calling Velora from inside the internal leverage swap call list) because it
-doesn’t fit the multicall sweep + dust invariants and creates a brittle call graph.
+Phase 1 direction for the internal leverage swap route:
+
+- We are moving to **Velora Market API v6.2 → tx calldata → wrap as `IMulticallExecutor.Call[]`** for the internal
+  `debtAsset -> collateral` swap during the flashloan lifecycle.
+- This means the internal swapCalls will often call **Augustus** and is therefore a **nested Augustus** call graph in
+  Mode 1 (`Augustus (outer) → Seamless venue → multicallExecutor → Augustus (inner)`).
+- This has known tradeoffs:
+  - Augustus may retain dust on itself for some fee-transfer paths (not sweepable by Seamless).
+  - We still enforce “no stranded balances” on Seamless custody addresses (wrapper/router/multicallExecutor), but we do
+    not require Augustus itself to end at exact-zero.
+- Deep dive + experiments: `john-onboarding/design/dex-integration/InternalLeverageSwap.md`.
 
 ## Design
 
@@ -52,11 +61,15 @@ Execution is planned in multiple Gates:
   ParaSwap venue leg (no explicit receiver, no return value for `returnAmountPos`). In practice Gate 0 must be executed
   as a **non-recipient-aware** venue: `LeverageRouter.deposit(...)` always mints to `msg.sender` and returns no amount,
   so it cannot satisfy ParaSwap V6 “per-leg recipient + returnAmountPos” expectations for a venue leg.
-- **Gate 1 (Phase 1 workaround):** call a thin wrapper contract (`LeverageRouterRecipientWrapper`) as the venue target.
-  It calls `LeverageRouter.deposit(...)` and then (a) forwards minted LT shares to the per-leg `recipient`, and (b)
-  returns `sharesOut` as the first return value (`returnAmountPos=0`).
+- **Gate 1 (Phase 1 workaround):** call a thin wrapper contract (**`DexLeverageRouter`**, renamed from
+  `LeverageRouterRecipientWrapper`) as the venue target. It calls `LeverageRouter.deposit(...)` and then (a) forwards
+  minted LT shares to the per-leg `recipient`, and (b) returns `sharesOut` as the first return value
+  (`returnAmountPos=0`).
   - In E2E tests, we inject the wrapper bytecode via Tenderly `stateOverride.code` (no onchain deployment needed).
   - Long-term, this wrapper is replaced by a dedicated `LeverageDexRouter` surface.
+
+**Implementation rule (Phase 1):** any ParaSwap V6 “venue leg” execution MUST target **Gate 1** (`DexLeverageRouter`).
+Gate 0 is debug-only and MUST NOT be used as a ParaSwap venue target.
 
 ## DexLeverageRouter definition and steps to working swaps
 
@@ -77,10 +90,9 @@ held on that `recipient` (often the Augustus address itself).
 
 In `paraswap-dex-lib` we call the Gate 1 venue target:
 
-- `LeverageRouterRecipientWrapper` (aka “recipient-aware LeverageRouter wrapper”).
+- `DexLeverageRouter` (aka “recipient-aware LeverageRouter wrapper”; renamed from `LeverageRouterRecipientWrapper`).
 
-The deployed Solidity artifact can be named **`DexLeverageRouter`** (preferred naming) or keep the wrapper name — what
-matters is that the ABI matches `LEVERAGE_ROUTER_RECIPIENT_WRAPPER_IFACE` used by the DexLib module.
+What matters is that the ABI matches `LEVERAGE_ROUTER_RECIPIENT_WRAPPER_IFACE` used by the DexLib module.
 
 ### Implementation home (Solidity)
 
@@ -118,6 +130,43 @@ Expected semantics:
 - Transfer all minted shares to `receiver` (DexLib per-leg `recipient`).
 - Refund any dust to `refundRecipient` (Phase 1 uses `refundRecipient = receiver`).
 - Return `sharesOut` as the **first** return value (`returnAmountPos = 0`).
+
+Recommended wrapper hardening (Phase 1):
+
+- `depositToRecipient` should be `nonReentrant`.
+- Compute `sharesOut = sharesAfter - sharesBefore` and assert it matches expectations (e.g. `>= minShares`).
+- Approval hygiene: approve exact amount and (optionally) reset approval back to `0` after the call.
+- Dust hygiene: ensure the wrapper ends with `0` balance for tracked tokens (collateral + debt, and LT shares after transfer).
+- Parameter validation: for production deployments, configure router/executor immutably or via allowlists; at minimum validate
+  derived `collateralAsset/debtAsset` are sane for the given `leverageToken`.
+
+**Internal leverage swap route (`swapCalls`)**
+
+Even though the venue leg is “collateral -> LT”, leveraged mint still requires an internal swap during the flashloan
+lifecycle (`debtAsset -> collateral`) executed by the Seamless `multicallExecutor`.
+
+Phase 1 direction is to build those `swapCalls` via **Velora Market API v6.2** (Option A):
+
+- fetch swap tx calldata for `debtAsset -> collateral` (SELL exact-in, `amountIn = flashLoanAmount`)
+- set `userAddress = multicallExecutor` and `receiver = multicallExecutor`
+- wrap into Seamless call list:
+  1. `approve(debtAsset, augustusV6.2, amountIn)`
+  2. `{ target: augustusV6.2, value: tx.value, data: tx.data }`
+
+This introduces nested Augustus in Mode 1; Augustus may retain dust on itself (not sweepable). Phase 1 invariants
+should be treated as enforceable requirements (builder assertions + tests):
+
+- `userAddress == receiver == multicallExecutor` (so `msg.sender` and custody model match)
+- `txParams.to` MUST be an allowlisted Augustus address for `(chainId, version)` (do not blindly trust API output)
+- `txParams.value == 0` (Phase 1 forbids internal swaps that require native ETH)
+- approval spender MUST equal `txParams.to`
+- Seamless custody addresses must end clean (tracked tokens == 0):
+  - `multicallExecutor` (collateral + debtAsset)
+  - `DexLeverageRouter` wrapper (collateral + debtAsset + LT shares)
+  - `LeverageRouter` (as much as feasible)
+- Augustus dust is tolerated but should be measured/logged
+
+Deep dive + experiments: `john-onboarding/design/dex-integration/InternalLeverageSwap.md`.
 
 **Future surfaces (not Phase 1):**
 
@@ -224,3 +273,94 @@ yarn test src/dex/seamless-protocol/seamless-protocol-events.test.ts -t "1. Chec
 ```
 
 UNLIMITED_USD_LIQUIDITY is a hardcoded constant (1234567890)
+
+## Sample DexLeverageRouter (recipient-aware LeverageRouter wrapper)
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+import {ILeverageManager} from "src/interfaces/ILeverageManager.sol";
+import {ILeverageRouter} from "src/interfaces/periphery/ILeverageRouter.sol";
+import {ILeverageToken} from "src/interfaces/ILeverageToken.sol";
+import {IMulticallExecutor} from "src/interfaces/periphery/IMulticallExecutor.sol";
+
+/// @notice Thin wrapper around LeverageRouter for aggregator venue compatibility.
+/// @dev This contract is intentionally stateless (no constructor args) so it can be deployed via any mechanism
+/// (or injected in a fork simulation) and pointed at an existing LeverageRouter per call.
+contract DexLeverageRouter is ReentrancyGuard {
+    using SafeERC20 for IERC20;
+    using SafeERC20 for ILeverageToken;
+
+    /// @notice Deposit into a LeverageToken using an existing LeverageRouter, but deliver minted shares to `receiver`.
+    /// @dev `collateralFromSender` is the "equity" amount in collateral token units (same as LeverageRouter.deposit).
+    /// @param leverageToken LeverageToken to deposit into
+    /// @param collateralFromSender Collateral asset amount from msg.sender to deposit (equity)
+    /// @param flashLoanAmount Debt asset amount to flashloan
+    /// @param minShares Minimum shares required (passed through to LeverageRouter)
+    /// @param multicallExecutor Multicall executor used by LeverageRouter for swapCalls
+    /// @param swapCalls Swap calls executed by `multicallExecutor` (debtAsset -> collateral)
+    /// @param leverageRouter Existing LeverageRouter instance to execute against
+    /// @param receiver Recipient of minted LT shares
+    /// @param refundRecipient Recipient for any leftover collateral/debt dust on this wrapper
+    /// @return sharesOut Amount of LT shares delivered to `receiver`
+    function depositToRecipient(
+        ILeverageToken leverageToken,
+        uint256 collateralFromSender,
+        uint256 flashLoanAmount,
+        uint256 minShares,
+        IMulticallExecutor multicallExecutor,
+        IMulticallExecutor.Call[] calldata swapCalls,
+        ILeverageRouter leverageRouter,
+        address receiver,
+        address refundRecipient
+    ) external nonReentrant returns (uint256 sharesOut) {
+        ILeverageManager leverageManager = leverageRouter.leverageManager();
+
+        IERC20 collateralAsset = leverageManager.getLeverageTokenCollateralAsset(leverageToken);
+        IERC20 debtAsset = leverageManager.getLeverageTokenDebtAsset(leverageToken);
+
+        // Pull equity from caller into this wrapper and approve the router to pull it.
+        collateralAsset.safeTransferFrom(msg.sender, address(this), collateralFromSender);
+        collateralAsset.forceApprove(address(leverageRouter), collateralFromSender);
+
+        uint256 sharesBefore = leverageToken.balanceOf(address(this));
+
+        leverageRouter.deposit(
+            leverageToken,
+            collateralFromSender,
+            flashLoanAmount,
+            minShares,
+            multicallExecutor,
+            swapCalls
+        );
+
+        uint256 sharesAfter = leverageToken.balanceOf(address(this));
+        sharesOut = sharesAfter - sharesBefore;
+
+        // Underlying router enforces `minShares`, but keep the postcondition explicit.
+        require(sharesOut >= minShares, "minShares");
+
+        leverageToken.safeTransfer(receiver, sharesOut);
+
+        // Optional hygiene: reset approval (prevents lingering approvals if this wrapper is re-used).
+        collateralAsset.forceApprove(address(leverageRouter), 0);
+
+        // Sweep any unexpected dust from the wrapper back to refundRecipient.
+        // This keeps the wrapper stateless and avoids stranding tokens if the underlying router returns surplus debt.
+        uint256 collateralDust = collateralAsset.balanceOf(address(this));
+        if (collateralDust > 0) {
+            collateralAsset.safeTransfer(refundRecipient, collateralDust);
+        }
+
+        uint256 debtDust = debtAsset.balanceOf(address(this));
+        if (debtDust > 0) {
+            debtAsset.safeTransfer(refundRecipient, debtDust);
+        }
+    }
+}
+```

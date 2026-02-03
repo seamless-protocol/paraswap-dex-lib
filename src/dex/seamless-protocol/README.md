@@ -58,6 +58,88 @@ Execution is planned in multiple Gates:
   - In E2E tests, we inject the wrapper bytecode via Tenderly `stateOverride.code` (no onchain deployment needed).
   - Long-term, this wrapper is replaced by a dedicated `LeverageDexRouter` surface.
 
+## DexLeverageRouter definition and steps to working swaps
+
+This section documents the **minimum onchain surface** required for ParaSwap V6 “venue legs” and how we get from the
+current Tenderly-simulation workaround to a real, onchain-executable integration.
+
+### Why a wrapper is required (ParaSwap V6 execution semantics)
+
+In ParaSwap V6, each leg is built with a per-leg `recipient`. For SELL routes, the **final leg** expects output to be
+held on that `recipient` (often the Augustus address itself).
+
+`LeverageRouter.deposit(...)` is not a valid ParaSwap venue leg because:
+
+- It mints LT shares to `msg.sender` (no `receiver` parameter).
+- It returns no `uint256` output, so ParaSwap cannot set `returnAmountPos` for accounting.
+
+### Contract naming
+
+In `paraswap-dex-lib` we call the Gate 1 venue target:
+
+- `LeverageRouterRecipientWrapper` (aka “recipient-aware LeverageRouter wrapper”).
+
+The deployed Solidity artifact can be named **`DexLeverageRouter`** (preferred naming) or keep the wrapper name — what
+matters is that the ABI matches `LEVERAGE_ROUTER_RECIPIENT_WRAPPER_IFACE` used by the DexLib module.
+
+### Implementation home (Solidity)
+
+All Solidity deliverables for this integration should be implemented in:
+
+- `seamless-intents/` (Option B), which consumes `leverage-tokens` as a git submodule.
+
+This keeps execution surfaces out of `leverage-tokens` while still reusing its canonical protocol interfaces and
+periphery.
+
+### Minimal function surface (Phase 1: mint leg only)
+
+The minimal state-changing entrypoint needed to make **collateral -> LT** (mint) work as a ParaSwap venue leg:
+
+```solidity
+function depositToRecipient(
+    address leverageToken,
+    uint256 collateralFromSender,
+    uint256 flashLoanAmount,
+    uint256 minShares,
+    address multicallExecutor,
+    IMulticallExecutor.Call[] calldata swapCalls,
+    address leverageRouter,
+    address receiver,
+    address refundRecipient
+) external returns (uint256 sharesOut);
+```
+
+Expected semantics:
+
+- Pull `collateralFromSender` from `msg.sender` (ParaSwap executor) into the wrapper.
+- Call `LeverageRouter.deposit(...)` from the wrapper:
+  - Shares are minted to the wrapper.
+  - The internal leverage `swapCalls` run inside the flashloan lifecycle via the configured `multicallExecutor`.
+- Transfer all minted shares to `receiver` (DexLib per-leg `recipient`).
+- Refund any dust to `refundRecipient` (Phase 1 uses `refundRecipient = receiver`).
+- Return `sharesOut` as the **first** return value (`returnAmountPos = 0`).
+
+**Future surfaces (not Phase 1):**
+
+- A symmetric `redeemToRecipient(...)` for LT->collateral.
+- View-only quote helpers (e.g., a quoter contract) to support BUY (exact-out) and stable offchain quoting.
+
+### Steps to move from simulations to real swaps
+
+Today, the E2E tests **inject wrapper bytecode** at an address like `0x1111...1111` using Tenderly `stateOverride.code`.
+This is great for testing, but it does not exist onchain.
+
+To make real swaps work:
+
+1. Implement the wrapper contract in `seamless-intents` (Solidity) and compile.
+2. Deploy it to the chain you are testing against (mainnet fork/VNet for now).
+3. Update `paraswap-dex-lib/src/dex/seamless-protocol/config.ts`:
+   - Set `seamlessPeriphery.leverageRouterRecipientWrapper` to the deployed wrapper address (not a dummy).
+4. Update/adjust E2E tests:
+   - Keep the code-injection path for “pure simulation” runs if useful, but add a mode that uses the deployed address
+     directly (no `stateOverride.code`).
+5. (Later) replace the wrapper with a full `LeverageDexRouter` if/when Mode 2 or exact-out surfaces are required.
+
 ## Getting Started
 
 1. Configure supported markets in `src/dex/seamless-protocol/config.ts` (static list per network).

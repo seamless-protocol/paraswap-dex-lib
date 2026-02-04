@@ -42,6 +42,12 @@ Phase 1 scope is intentionally narrow and SELL/mint-first:
 - BUY is intentionally unsupported in Phase 1 (pool discovery returns `[]`, pricing returns `null`).
 - Quoting uses Seamless protocol previews (Phase 1: `LeverageRouter.previewDeposit`) and carries the derived
   `flashLoanAmount` forward into tx-building because `getDexParam` does not receive `blockNumber`.
+  - **Phase 1 flashloan sizing policy (current implementation):**
+    - `rawFlashLoanAmount = previewDeposit(...).debt`
+    - `flashLoanAmount = rawFlashLoanAmount * (1 - 5%)`
+    - Rationale: in multi-leg SELL routes the executor may patch the final leg `fromAmount` to the actual intermediate
+      balance after previous swaps; a small downward buffer reduces the risk of “borrow too much” failures.
+    - This policy is intentionally **fixed** in Phase 1 (documented only; not parameterized yet).
 
 **Top pools behavior (`getTopPoolsForToken`)**
 
@@ -61,10 +67,9 @@ Execution is planned in multiple Gates:
   ParaSwap venue leg (no explicit receiver, no return value for `returnAmountPos`). In practice Gate 0 must be executed
   as a **non-recipient-aware** venue: `LeverageRouter.deposit(...)` always mints to `msg.sender` and returns no amount,
   so it cannot satisfy ParaSwap V6 “per-leg recipient + returnAmountPos” expectations for a venue leg.
-- **Gate 1 (Phase 1 workaround):** call a thin wrapper contract (**`DexLeverageRouter`**, renamed from
-  `LeverageRouterRecipientWrapper`) as the venue target. It calls `LeverageRouter.deposit(...)` and then (a) forwards
-  minted LT shares to the per-leg `recipient`, and (b) returns `sharesOut` as the first return value
-  (`returnAmountPos=0`).
+- **Gate 1 (Phase 1):** call a thin wrapper contract (**`DexLeverageRouter`**) as the venue target. It calls
+  `LeverageRouter.deposit(...)` and then (a) forwards minted LT shares to the per-leg `recipient`, and (b) returns
+  `sharesOut` as the first return value (`returnAmountPos=0`).
   - In E2E tests, we call a deployed `DexLeverageRouter` address from `config.ts`.
   - Long-term, this wrapper is replaced by a dedicated `LeverageDexRouter` surface.
 
@@ -90,7 +95,7 @@ held on that `recipient` (often the Augustus address itself).
 
 In `paraswap-dex-lib` we call the Gate 1 venue target:
 
-- `DexLeverageRouter` (aka “recipient-aware LeverageRouter wrapper”; renamed from `LeverageRouterRecipientWrapper`).
+- `DexLeverageRouter` (recipient-aware wrapper around `LeverageRouter.deposit(...)`).
 
 What matters is that the ABI matches the `DexLeverageRouter` interface used by the DexLib module (see
 `src/abi/seamless-protocol/DexLeverageRouter.json`).
@@ -210,6 +215,9 @@ VELORA_API_URL=https://api.paraswap.io
 # When set, SeamlessProtocol will load fixtures from this file and use them instead of calling the live API.
 SEAMLESS_VELORA_SWAP_FIXTURES_PATH=tests/fixtures/seamless-protocol/velora-swap.json
 # If set to `1`, missing fixtures are a hard error (no fallback to live API).
+# Recommendation:
+# - CI: strict (`CI=true` in the test environment; E2E enables strict mode by default)
+# - local: non-strict (allows fallback to live API if a fixture is missing)
 SEAMLESS_VELORA_SWAP_FIXTURES_STRICT=0
 
 # Optional: pin block number in E2E (keeps previewDeposit + fixture keys in sync).

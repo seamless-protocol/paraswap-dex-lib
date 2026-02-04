@@ -111,8 +111,11 @@ describe('SeamlessProtocol E2E', () => {
 
       // Force LocalParaswapSDK (no ParaSwap public API) and pin execution to the local SeamlessProtocol module.
       process.env.SEAMLESS_VELORA_SWAP_FIXTURES_PATH = fixturesPath;
-      process.env.SEAMLESS_VELORA_SWAP_FIXTURES_STRICT =
-        opts?.strictVeloraFixtures ? '1' : '0';
+      const strictVeloraFixtures =
+        opts?.strictVeloraFixtures ?? Boolean(process.env.CI);
+      process.env.SEAMLESS_VELORA_SWAP_FIXTURES_STRICT = strictVeloraFixtures
+        ? '1'
+        : '0';
 
       const sdk = new LocalParaswapSDK(network, dexKey, '');
       const blockToPin = opts?.pinBlockNumber;
@@ -242,7 +245,7 @@ describe('SeamlessProtocol E2E', () => {
     it('1. Check Swap CollateralToken to LeverageToken: wstETH to WSTETH-ETH-25x', async () => {
       await simulateE2E('wstETH', 'WSTETH-ETH-25x', 10n ** 19n, {
         pinBlockNumber: pinnedBlockNumber,
-        strictVeloraFixtures: true,
+        strictVeloraFixtures: Boolean(process.env.CI),
       });
     });
 
@@ -256,7 +259,9 @@ describe('SeamlessProtocol E2E', () => {
       // - USDC->wstETH leg is frozen via a ParaSwap /prices fixture (no live API call)
       // - internal leverage swap (/swap, debtAsset->collateral) is frozen via Velora /swap fixtures
       process.env.SEAMLESS_VELORA_SWAP_FIXTURES_PATH = fixturesPath;
-      process.env.SEAMLESS_VELORA_SWAP_FIXTURES_STRICT = '1';
+      process.env.SEAMLESS_VELORA_SWAP_FIXTURES_STRICT = Boolean(process.env.CI)
+        ? '1'
+        : '0';
 
       const tenderlySimulator = TenderlySimulator.getInstance();
       const userAddress = TenderlySimulator.DEFAULT_OWNER;

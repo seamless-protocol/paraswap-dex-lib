@@ -25,14 +25,10 @@ import { ParaSwapVersion } from '@paraswap/core';
 import { v4 as uuid } from 'uuid';
 import { SeamlessProtocol } from './seamless-protocol';
 import { TxObject } from '../../types';
-import * as fs from 'fs';
-import * as path from 'path';
 import { ethers } from 'ethers';
 
 describe('SeamlessProtocol E2E', () => {
   const dexKey = 'SeamlessProtocol';
-  const LEVERAGE_ROUTER_RECIPIENT_WRAPPER =
-    '0x1111111111111111111111111111111111111111';
 
   describe('Mainnet', () => {
     const network = Network.MAINNET;
@@ -54,24 +50,6 @@ describe('SeamlessProtocol E2E', () => {
         (_key, value) => (typeof value === 'bigint' ? value.toString() : value),
         2,
       );
-
-    const getLeverageRouterRecipientWrapperRuntimeBytecode = (): string => {
-      // Loaded from the Foundry artifact in leverage-tokens. This keeps the DexLib side self-contained while we
-      // iterate on the wrapper contract.
-      const artifactPath = path.resolve(
-        __dirname,
-        '../../../../leverage-tokens/out/LeverageRouterRecipientWrapper.sol/LeverageRouterRecipientWrapper.json',
-      );
-      const artifact = JSON.parse(fs.readFileSync(artifactPath, 'utf8')) as {
-        deployedBytecode?: { object?: string };
-      };
-      const runtimeBytecode = artifact.deployedBytecode?.object;
-      assert(
-        typeof runtimeBytecode === 'string' && runtimeBytecode.startsWith('0x'),
-        `Missing deployedBytecode.object in ${artifactPath}`,
-      );
-      return runtimeBytecode;
-    };
 
     const logRouteSummary = (title: string, priceRoute: any) => {
       const swaps = priceRoute?.bestRoute?.[0]?.swaps ?? [];
@@ -130,12 +108,6 @@ describe('SeamlessProtocol E2E', () => {
       const tenderlySimulator = TenderlySimulator.getInstance();
       const userAddress = TenderlySimulator.DEFAULT_OWNER;
       const stateOverride: StateOverride = {};
-
-      // Inject the Gate 1 venue wrapper code so the SeamlessProtocol leg can honor recipient semantics and return
-      // `sharesOut` for returnAmountPos.
-      stateOverride[LEVERAGE_ROUTER_RECIPIENT_WRAPPER.toLowerCase()] = {
-        code: getLeverageRouterRecipientWrapperRuntimeBytecode(),
-      };
 
       // fund x2 just in case
       const amountToFund = BigInt(priceRoute.srcAmount) * 2n;
@@ -196,7 +168,6 @@ describe('SeamlessProtocol E2E', () => {
         destSymbol,
         srcAmount: priceRoute.srcAmount,
         destAmount: priceRoute.destAmount,
-        wrapperInjectedAt: LEVERAGE_ROUTER_RECIPIENT_WRAPPER,
       });
 
       const { simulation } = await tenderlySimulator.simulateTransaction(
@@ -246,10 +217,6 @@ describe('SeamlessProtocol E2E', () => {
       const tenderlySimulator = TenderlySimulator.getInstance();
       const userAddress = TenderlySimulator.DEFAULT_OWNER;
       const stateOverride: StateOverride = {};
-
-      stateOverride[LEVERAGE_ROUTER_RECIPIENT_WRAPPER.toLowerCase()] = {
-        code: getLeverageRouterRecipientWrapperRuntimeBytecode(),
-      };
 
       // 1) Get USDC -> wstETH via ParaSwap API (Velora routing engine) for realism.
       //    NOTE: API `blockNumber` can be ahead of our RPC head (e.g. when using a fixed/block-pinned fork RPC),

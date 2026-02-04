@@ -65,7 +65,7 @@ Execution is planned in multiple Gates:
   `LeverageRouterRecipientWrapper`) as the venue target. It calls `LeverageRouter.deposit(...)` and then (a) forwards
   minted LT shares to the per-leg `recipient`, and (b) returns `sharesOut` as the first return value
   (`returnAmountPos=0`).
-  - In E2E tests, we inject the wrapper bytecode via Tenderly `stateOverride.code` (no onchain deployment needed).
+  - In E2E tests, we call a deployed `DexLeverageRouter` address from `config.ts`.
   - Long-term, this wrapper is replaced by a dedicated `LeverageDexRouter` surface.
 
 **Implementation rule (Phase 1):** any ParaSwap V6 “venue leg” execution MUST target **Gate 1** (`DexLeverageRouter`).
@@ -92,7 +92,8 @@ In `paraswap-dex-lib` we call the Gate 1 venue target:
 
 - `DexLeverageRouter` (aka “recipient-aware LeverageRouter wrapper”; renamed from `LeverageRouterRecipientWrapper`).
 
-What matters is that the ABI matches `LEVERAGE_ROUTER_RECIPIENT_WRAPPER_IFACE` used by the DexLib module.
+What matters is that the ABI matches the `DexLeverageRouter` interface used by the DexLib module (see
+`src/abi/seamless-protocol/DexLeverageRouter.json`).
 
 ### Implementation home (Solidity)
 
@@ -175,18 +176,17 @@ Deep dive + experiments: `john-onboarding/design/dex-integration/InternalLeverag
 
 ### Steps to move from simulations to real swaps
 
-Today, the E2E tests **inject wrapper bytecode** at an address like `0x1111...1111` using Tenderly `stateOverride.code`.
-This is great for testing, but it does not exist onchain.
+Earlier, the E2E tests injected wrapper bytecode at a dummy address (e.g. `0x1111...1111`) using Tenderly
+`stateOverride.code`. The current Phase 1 path uses a deployed `DexLeverageRouter` address.
 
 To make real swaps work:
 
 1. Implement the wrapper contract in `seamless-intents` (Solidity) and compile.
 2. Deploy it to the chain you are testing against (mainnet fork/VNet for now).
 3. Update `paraswap-dex-lib/src/dex/seamless-protocol/config.ts`:
-   - Set `seamlessPeriphery.leverageRouterRecipientWrapper` to the deployed wrapper address (not a dummy).
+   - Set `seamlessPeriphery.dexLeverageRouter` to the deployed wrapper address.
 4. Update/adjust E2E tests:
-   - Keep the code-injection path for “pure simulation” runs if useful, but add a mode that uses the deployed address
-     directly (no `stateOverride.code`).
+   - Ensure tests use the deployed wrapper address directly (no `stateOverride.code` injection).
 5. (Later) replace the wrapper with a full `LeverageDexRouter` if/when Mode 2 or exact-out surfaces are required.
 
 ## Getting Started
@@ -200,6 +200,11 @@ HTTP_PROVIDER_1=<mainnet RPC URL>
 TENDERLY_TOKEN=...
 TENDERLY_ACCOUNT_ID=...
 TENDERLY_PROJECT=...
+
+# Velora/ParaSwap Market API base URL used to build the *internal leverage swap route*
+# (debtAsset -> collateral) via `GET /swap` inside `SeamlessProtocol.getDexParam`.
+# Defaults to https://api.paraswap.io if unset.
+VELORA_API_URL=https://api.paraswap.io
 
 # If you want DexLib to price and route through the local SeamlessProtocol module:
 # - unset E2E_TEST_ENDPOINT, OR

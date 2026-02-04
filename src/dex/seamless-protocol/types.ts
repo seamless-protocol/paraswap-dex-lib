@@ -25,7 +25,7 @@ export type SeamlessPeriphery = {
   // Gate 0 (optional): used only for swapCalls encoding validation.
   leverageRouter?: Address;
   // Gate 1 (required): ParaSwap venue call target (thin wrapper around LeverageRouter with explicit recipient + return value).
-  leverageRouterRecipientWrapper?: Address;
+  dexLeverageRouter?: Address;
 };
 
 export type SeamlessLeverageToken = {

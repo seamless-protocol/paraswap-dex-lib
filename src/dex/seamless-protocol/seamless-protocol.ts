@@ -1,4 +1,5 @@
 import { Interface } from '@ethersproject/abi';
+import axios from 'axios';
 import { AsyncOrSync } from 'ts-essentials';
 import {
   Token,
@@ -19,24 +20,23 @@ import { IDex } from '../../dex/idex';
 import { IDexHelper } from '../../dex-helper/idex-helper';
 import { SeamlessProtocolData, DexParams } from './types';
 import { SimpleExchange } from '../simple-exchange';
-import { getLocalDeadlineAsFriendlyPlaceholder } from '../simple-exchange';
 import { SeamlessProtocolConfig } from './config';
 import { SeamlessProtocolEventPool } from './seamless-protocol-pool';
 import LEVERAGE_ROUTER_ABI from '../../abi/seamless-protocol/LeverageRouter.json';
-import LEVERAGE_ROUTER_RECIPIENT_WRAPPER_ABI from '../../abi/seamless-protocol/LeverageRouterRecipientWrapper.json';
-import UNISWAP_V3_ROUTER_ABI from '../../abi/uniswap-v3/UniswapV3Router.abi.json';
+import DEX_LEVERAGE_ROUTER_ABI from '../../abi/seamless-protocol/DexLeverageRouter.json';
+import { uint8ToNumber } from '../../lib/decoders';
 
 const LEVERAGE_ROUTER_IFACE = new Interface(LEVERAGE_ROUTER_ABI);
-const LEVERAGE_ROUTER_RECIPIENT_WRAPPER_IFACE = new Interface(
-  LEVERAGE_ROUTER_RECIPIENT_WRAPPER_ABI,
-);
-const UNISWAP_V3_ROUTER_IFACE = new Interface(UNISWAP_V3_ROUTER_ABI);
+const DEX_LEVERAGE_ROUTER_IFACE = new Interface(DEX_LEVERAGE_ROUTER_ABI);
 const GAS_COST_PREVIEW_DEPOSIT = 75_000;
 // Phase 1 pragmatic guardrail:
 // In multi-leg SELL routes, the executor may patch the final leg's `fromAmount` to the actual balance after previous
 // swaps. Since we precompute `flashLoanAmount` offchain (from previewDeposit), a small downward buffer reduces the risk
 // of "borrowed too much debt" leading to Morpho repayment failures when the actual collateral input is slightly lower.
 const FLASHLOAN_AMOUNT_BUFFER_BPS = 500n; // 5%
+const VELORE_VERSION = '6.2';
+const DEFAULT_VELORA_API_URL = 'https://api.paraswap.io';
+const INTERNAL_SWAP_SLIPPAGE_BPS = '100'; // 1%
 
 export class SeamlessProtocol
   extends SimpleExchange
@@ -55,6 +55,8 @@ export class SeamlessProtocol
 
   logger: Logger;
   protected config: DexParams;
+  private readonly veloraApiUrl: string;
+  private readonly tokenDecimalsCache = new Map<string, number>();
 
   constructor(
     readonly network: Network,
@@ -73,6 +75,12 @@ export class SeamlessProtocol
       dexHelper,
       this.logger,
     );
+    // Used only for building the internal leverage swap route (debtAsset -> collateral) via Velora Market API v6.2.
+    // Keep separate from E2E_TEST_ENDPOINT so local pricing can still be forced while internal swaps use the API.
+    this.veloraApiUrl =
+      process.env.VELORA_API_URL ||
+      process.env.SEAMLESS_VELORA_API_URL ||
+      DEFAULT_VELORA_API_URL;
   }
 
   // Initialize pricing is called once in the start of
@@ -301,11 +309,10 @@ export class SeamlessProtocol
       );
     }
 
-    const leverageRouterRecipientWrapper =
-      market.seamlessPeriphery.leverageRouterRecipientWrapper;
-    if (!leverageRouterRecipientWrapper) {
+    const dexLeverageRouter = market.seamlessPeriphery.dexLeverageRouter;
+    if (!dexLeverageRouter) {
       throw new Error(
-        `${this.dexKey} missing leverageRouterRecipientWrapper (Gate 1) for lt=${data.leverageToken}`,
+        `${this.dexKey} missing dexLeverageRouter (Gate 1) for lt=${data.leverageToken}`,
       );
     }
 
@@ -316,36 +323,36 @@ export class SeamlessProtocol
     // - returns `sharesOut` as the first return value (returnAmountPos=0)
     //
     // Internal swapCalls (debtAsset -> collateral) are executed by the Seamless multicallExecutor during the flashloan
-    // lifecycle. Phase 1: we only support WETH->wstETH via Uniswap V3 to keep the E2E harness deterministic.
+    // lifecycle. Phase 1: build swapCalls via Velora Market API v6.2 and wrap the returned tx calldata as an
+    // IMulticallExecutor.Call[] (nested Augustus).
     const debtToken = market.seamlessLeverageToken.debtToken;
-    const swapCalls = this.buildDebtToCollateralSwapCalls({
+    const swapCalls = await this.buildDebtToCollateralSwapCalls({
       debtToken,
       collateralToken,
       multicallExecutor: market.seamlessPeriphery.multicallExecutor,
       flashLoanAmount: data.flashLoanAmount,
     });
 
-    const exchangeData =
-      LEVERAGE_ROUTER_RECIPIENT_WRAPPER_IFACE.encodeFunctionData(
-        'depositToRecipient',
-        [
-          leverageToken,
-          srcAmount,
-          data.flashLoanAmount.toString(),
-          // ParaSwap sets per-leg destAmount=1 for SELL; keep router minShares minimal and let Augustus enforce global slippage.
-          '1',
-          market.seamlessPeriphery.multicallExecutor,
-          swapCalls,
-          leverageRouter,
-          _recipient,
-          _recipient,
-        ],
-      );
+    const exchangeData = DEX_LEVERAGE_ROUTER_IFACE.encodeFunctionData(
+      'depositToRecipient',
+      [
+        leverageToken,
+        srcAmount,
+        data.flashLoanAmount.toString(),
+        // ParaSwap sets per-leg destAmount=1 for SELL; keep router minShares minimal and let Augustus enforce global slippage.
+        '1',
+        market.seamlessPeriphery.multicallExecutor,
+        swapCalls,
+        leverageRouter,
+        _recipient,
+        _recipient,
+      ],
+    );
 
     return {
       needWrapNative: this.needWrapNative,
       dexFuncHasRecipient: true,
-      targetExchange: leverageRouterRecipientWrapper,
+      targetExchange: dexLeverageRouter,
       exchangeData,
       // depositToRecipient(leverageToken, collateralFromSender, ...) => argIndex( collateralFromSender ) == 1 => 4 + 32*1 == 36
       // Avoid accidental matches inside nested dynamic bytes (swapCalls) by forcing the patch location.
@@ -355,59 +362,99 @@ export class SeamlessProtocol
     };
   }
 
-  private buildDebtToCollateralSwapCalls(params: {
+  private async getTokenDecimals(token: Address): Promise<number> {
+    const key = token.toLowerCase();
+    const cached = this.tokenDecimalsCache.get(key);
+    if (cached !== undefined) return cached;
+
+    const [decimals] = await this.dexHelper.multiWrapper.aggregate([
+      {
+        target: token,
+        callData: '0x313ce567', // decimals()
+        decodeFunction: uint8ToNumber,
+      },
+    ]);
+
+    this.tokenDecimalsCache.set(key, decimals);
+    return decimals;
+  }
+
+  private async buildDebtToCollateralSwapCalls(params: {
     debtToken: Address;
     collateralToken: Address;
     multicallExecutor: Address;
     flashLoanAmount: bigint;
-  }): [Address, NumberAsString, string][] {
-    // Phase 1: only support WETH -> wstETH on Mainnet (used by our E2E harness).
-    // If/when we switch to a Balmy/defi-sdk based builder, this becomes dynamic.
-    if (this.network !== Network.MAINNET) {
+  }): Promise<[Address, NumberAsString, string][]> {
+    if (params.flashLoanAmount === 0n) return [];
+
+    const augustusV6 = this.augustusV6Address;
+    if (!augustusV6) {
+      throw new Error(`${this.dexKey} missing augustusV6Address in config`);
+    }
+
+    const srcDecimals = await this.getTokenDecimals(params.debtToken);
+    const destDecimals = await this.getTokenDecimals(params.collateralToken);
+
+    // Phase 1: use Velora Market API v6.2 /swap endpoint to build a debtAsset->collateral internal route.
+    // IMPORTANT: userAddress == receiver == multicallExecutor, because swap targets see msg.sender == multicallExecutor.
+    const { data } = await axios.get(`${this.veloraApiUrl}/swap`, {
+      params: {
+        network: this.network.toString(),
+        version: VELORE_VERSION,
+        side: SwapSide.SELL,
+        srcToken: params.debtToken,
+        srcDecimals,
+        destToken: params.collateralToken,
+        destDecimals,
+        amount: params.flashLoanAmount.toString(),
+        userAddress: params.multicallExecutor,
+        receiver: params.multicallExecutor,
+        slippage: INTERNAL_SWAP_SLIPPAGE_BPS,
+        // Keep Phase 1 conservative: avoid legs that introduce permit2 / native routing complexity.
+        excludeDEXS: 'Native,UniswapV4',
+      },
+      timeout: 30_000,
+    });
+
+    const txParams = data?.txParams;
+    if (!txParams?.to || !txParams?.data) {
       throw new Error(
-        `${this.dexKey} Gate 1 swapCalls only implemented for MAINNET`,
+        `${this.dexKey} invalid Velora /swap response (missing txParams.to/data)`,
       );
     }
 
-    const WETH = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'.toLowerCase();
-    const WSTETH = '0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0'.toLowerCase();
-    if (
-      params.debtToken.toLowerCase() !== WETH ||
-      params.collateralToken.toLowerCase() !== WSTETH
-    ) {
+    const to = String(txParams.to);
+    if (to.toLowerCase() !== augustusV6.toLowerCase()) {
       throw new Error(
-        `${this.dexKey} Gate 1 swapCalls only supports WETH->wstETH (debt=${params.debtToken}, collateral=${params.collateralToken})`,
+        `${this.dexKey} unexpected augustus target from /swap (to=${to}, expected=${augustusV6})`,
       );
     }
 
-    // Uniswap V3 SwapRouter (mainnet) — deterministic onchain venue for the internal debt->collateral swap.
-    const uniswapV3Router = '0xE592427A0AEce92De3Edee1F18E0157C05861564';
-    const approveData = this.erc20Interface.encodeFunctionData('approve', [
-      uniswapV3Router,
+    const rawValue = txParams.value ?? '0';
+    const value = BigInt(rawValue.toString());
+    if (value !== 0n) {
+      throw new Error(
+        `${
+          this.dexKey
+        } Phase 1 forbids internal swaps with value>0 (value=${value.toString()})`,
+      );
+    }
+
+    // Approval is executed by multicallExecutor.
+    // Use a "reset to 0 then set" pattern for USDT-like tokens.
+    const approveZero = this.erc20Interface.encodeFunctionData('approve', [
+      to,
+      '0',
+    ]);
+    const approveAmount = this.erc20Interface.encodeFunctionData('approve', [
+      to,
       params.flashLoanAmount.toString(),
     ]);
 
-    const swapData = UNISWAP_V3_ROUTER_IFACE.encodeFunctionData(
-      'exactInputSingle',
-      [
-        {
-          tokenIn: params.debtToken,
-          tokenOut: params.collateralToken,
-          // WETH/wstETH pools exist at 100/500/3000; pick 100 for best liquidity/lowest impact.
-          fee: 100,
-          // Keep the output on the multicall executor so `multicallAndSweep` can sweep it back to the router.
-          recipient: params.multicallExecutor,
-          deadline: getLocalDeadlineAsFriendlyPlaceholder(),
-          amountIn: params.flashLoanAmount.toString(),
-          amountOutMinimum: '0',
-          sqrtPriceLimitX96: '0',
-        },
-      ],
-    );
-
     return [
-      [params.debtToken, '0', approveData],
-      [uniswapV3Router, '0', swapData],
+      [params.debtToken, '0', approveZero],
+      [params.debtToken, '0', approveAmount],
+      [to, '0', String(txParams.data)],
     ];
   }
 

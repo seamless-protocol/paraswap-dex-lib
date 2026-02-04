@@ -31,7 +31,7 @@ Phase 1 direction for the internal leverage swap route:
   - Augustus may retain dust on itself for some fee-transfer paths (not sweepable by Seamless).
   - We still enforce “no stranded balances” on Seamless custody addresses (wrapper/router/multicallExecutor), but we do
     not require Augustus itself to end at exact-zero.
-- Deep dive + experiments: `john-onboarding/design/dex-integration/InternalLeverageSwap.md`.
+- Deep dive + experiments: `john-onboarding/design/dex-integration/internalLeverageSwap.md`.
 
 ## Design
 
@@ -172,27 +172,120 @@ should be treated as enforceable requirements (builder assertions + tests):
   - `LeverageRouter` (as much as feasible)
 - Augustus dust is tolerated but should be measured/logged
 
-Deep dive + experiments: `john-onboarding/design/dex-integration/InternalLeverageSwap.md`.
+Deep dive + experiments: `john-onboarding/design/dex-integration/internalLeverageSwap.md`.
 
-**Future surfaces (not Phase 1):**
+### Steps to move from simulations to real swaps (Phase 1 status)
 
-- A symmetric `redeemToRecipient(...)` for LT->collateral.
-- View-only quote helpers (e.g., a quoter contract) to support BUY (exact-out) and stable offchain quoting.
+What is already done in `paraswap-dex-lib`:
 
-### Steps to move from simulations to real swaps
+1. **Gate 1 venue encoding is implemented**
+   - `SeamlessProtocol.getDexParam(...)` encodes `DexLeverageRouter.depositToRecipient(...)` and returns:
+     - `returnAmountPos = 0` (sharesOut as first return value)
+     - `insertFromAmountPos = 36` (patches `collateralFromSender` arg)
+   - code: `src/dex/seamless-protocol/seamless-protocol.ts`
+2. **ABI + config wiring exists**
+   - ABI: `src/abi/seamless-protocol/DexLeverageRouter.json`
+   - Config field: `seamlessPeriphery.dexLeverageRouter` in `src/dex/seamless-protocol/config.ts`
+3. **Internal leverage swap route builder exists (Velora /swap)**
+   - Built as multicall `swapCalls` (`approve(0)`, `approve(amount)`, `call(augustus, tx.data)`).
+   - Strict fixture support:
+     - `SEAMLESS_VELORA_SWAP_FIXTURES_PATH`
+     - `SEAMLESS_VELORA_SWAP_FIXTURES_STRICT`
+   - code: `src/dex/seamless-protocol/seamless-protocol.ts`
 
-Earlier, the E2E tests injected wrapper bytecode at a dummy address (e.g. `0x1111...1111`) using Tenderly
-`stateOverride.code`. The current Phase 1 path uses a deployed `DexLeverageRouter` address.
+What is still needed for _real onchain execution_ (not just simulation):
 
-To make real swaps work:
+1. **Deploy `DexLeverageRouter` to mainnet**
+   - Phase 1 goal is “mainnet-canonical addresses” so forks/VNets reuse the same addresses automatically.
+   - Until this exists on mainnet, any “real tx” against mainnet RPC will revert at the Seamless venue leg because
+     `targetExchange = dexLeverageRouter` must have code.
+2. **Ensure your execution environment contains the deployment**
+   - Tenderly simulation/VNet: fork a block **after** the deployment and set `TENDERLY_VNET_ID` so simulations “see”
+     the VNet state.
+   - Mainnet RPC: the contract must actually be deployed on mainnet (no state overrides).
+3. **Keep fixtures deterministic for CI**
+   - CI should run with strict fixtures so internal swap calldata does not drift as routing changes.
+   - Local iteration can remain non-strict (fallback to live `/swap`) until you decide to fully freeze.
 
-1. Implement the wrapper contract in `seamless-intents` (Solidity) and compile.
-2. Deploy it to the chain you are testing against (mainnet fork/VNet for now).
-3. Update `paraswap-dex-lib/src/dex/seamless-protocol/config.ts`:
-   - Set `seamlessPeriphery.dexLeverageRouter` to the deployed wrapper address.
-4. Update/adjust E2E tests:
-   - Ensure tests use the deployed wrapper address directly (no `stateOverride.code` injection).
-5. (Later) replace the wrapper with a full `LeverageDexRouter` if/when Mode 2 or exact-out surfaces are required.
+Long-term: once `DexLeverageRouter` is mainnet-deployed, we can remove VNet-only address juggling and treat forks/VNets
+as pure RPC environment differences.
+
+## Future surfaces (not Phase 1)
+
+Phase 1 is intentionally **SELL exact-in, mint-only**. The next feature additions should happen in this order to avoid
+re-deriving “hidden” quantities in tx-building (especially debt sizing) and to keep routes deterministic.
+
+### 1) Quoting functionality (mint + redeem; exact-in + exact-out; flashLoanAmount)
+
+Goal: a stable, view-only quote surface that:
+
+- matches canonical `leverage-tokens` preview semantics (no duplicated math), and
+- returns the **debt sizing signal** (`flashLoanAmount`) explicitly so offchain builders don’t guess.
+
+Proposed contract (Phase 2): `SeamlessLTQuoter` (standalone view-only contract, deployed from `seamless-intents`).
+
+Minimum interface to support future BUY + redeem:
+
+```solidity
+function quoteMintFromCollateralExactIn(address lt, uint256 collateralIn)
+  external view returns (uint256 sharesOut, ActionData memory action, uint256 flashLoanAmount);
+
+function quoteMintFromCollateralExactOut(address lt, uint256 sharesOut)
+  external view returns (uint256 collateralIn, ActionData memory action, uint256 flashLoanAmount);
+
+function quoteRedeemToCollateralExactIn(address lt, uint256 sharesIn)
+  external view returns (uint256 collateralOut, ActionData memory action, uint256 flashLoanAmount);
+
+function quoteRedeemToCollateralExactOut(address lt, uint256 collateralOut)
+  external view returns (uint256 sharesIn, ActionData memory action, uint256 flashLoanAmount);
+```
+
+Implementation notes:
+
+- The quoter should call existing preview functions (e.g., `LeverageRouter.previewDeposit` / manager previews) rather
+  than re-implementing fee/leverage math.
+- The returned `flashLoanAmount` should be deterministic and documented (buffer/no-buffer policy).
+- DexLib `getPricesVolume` should prefer the quoter once deployed, but may keep the current `previewDeposit` fallback
+  for Gate 0/Phase 1.
+
+### 2) Redeem functionality (LT -> collateral)
+
+Execution surface:
+
+- Add a symmetric wrapper entrypoint to `DexLeverageRouter`:
+  - `redeemToRecipient(...)` that calls `LeverageRouter.redeem(...)` and forwards collateral to `receiver`.
+
+Key complexity:
+
+- Redeem must repay debt during the flashloan lifecycle, typically requiring an internal **collateral -> debt** swap.
+- Unlike mint, the available collateral to swap is only known after redeem executes, so deterministically building the
+  repay swap is harder.
+
+Recommended implementation path:
+
+1. Use quoter outputs to derive debt sizing for redeem (`flashLoanAmount`).
+2. Build internal swapCalls using Velora API in a way compatible with repayment:
+   - likely requires BUY/exact-out semantics (buy exact debt amount).
+3. Add E2E coverage for:
+   - `LT -> collateral` venue leg
+   - recipient correctness and “no stranded balances” invariants.
+
+### 3) Exact-out (BUY) functionality
+
+To support ParaSwap `swapExactAmountOut` (BUY):
+
+- Pricing must support exact-out quote endpoints (quoter required).
+- `getPoolIdentifiers` must advertise BUY pools (currently returns `[]` by design).
+- `getPricesVolume` must return BUY quotes (currently returns `null` by design).
+- `getDexParam` must encode the correct router function and set:
+  - `insertFromAmountPos` for the max-in arg location (signature-dependent).
+
+Start with:
+
+- BUY collateral -> LT exact-out (mint exact sharesOut, max collateral in),
+  then add:
+- BUY LT -> collateral exact-out (redeem exact collateralOut, max shares in),
+  once redeem execution is stable.
 
 ## Getting Started
 

@@ -1,5 +1,7 @@
 import { Interface } from '@ethersproject/abi';
 import axios from 'axios';
+import * as fs from 'fs';
+import * as path from 'path';
 import { AsyncOrSync } from 'ts-essentials';
 import {
   Token,
@@ -37,6 +39,15 @@ const FLASHLOAN_AMOUNT_BUFFER_BPS = 500n; // 5%
 const VELORE_VERSION = '6.2';
 const DEFAULT_VELORA_API_URL = 'https://api.paraswap.io';
 const INTERNAL_SWAP_SLIPPAGE_BPS = '100'; // 1%
+const INTERNAL_SWAP_EXCLUDE_DEXS = 'Native,UniswapV4';
+const VELORA_SWAP_FIXTURES_PATH_ENV = 'SEAMLESS_VELORA_SWAP_FIXTURES_PATH';
+const VELORA_SWAP_FIXTURES_STRICT_ENV = 'SEAMLESS_VELORA_SWAP_FIXTURES_STRICT';
+const VELORA_SWAP_FIXTURES_STRICT_DEFAULT = false;
+type VeloraSwapTxParams = {
+  to: Address;
+  data: string;
+  value?: NumberAsString;
+};
 
 export class SeamlessProtocol
   extends SimpleExchange
@@ -57,6 +68,12 @@ export class SeamlessProtocol
   protected config: DexParams;
   private readonly veloraApiUrl: string;
   private readonly tokenDecimalsCache = new Map<string, number>();
+  private readonly veloraSwapFixtures?: Map<string, VeloraSwapTxParams>;
+  private readonly veloraSwapFixturesStrict: boolean;
+  private readonly veloraSwapCallsCache = new Map<
+    string,
+    [Address, NumberAsString, string][]
+  >();
 
   constructor(
     readonly network: Network,
@@ -81,6 +98,24 @@ export class SeamlessProtocol
       process.env.VELORA_API_URL ||
       process.env.SEAMLESS_VELORA_API_URL ||
       DEFAULT_VELORA_API_URL;
+
+    this.veloraSwapFixturesStrict =
+      (process.env[VELORA_SWAP_FIXTURES_STRICT_ENV] ?? '') === '1' ||
+      VELORA_SWAP_FIXTURES_STRICT_DEFAULT;
+    const fixturesPath = process.env[VELORA_SWAP_FIXTURES_PATH_ENV];
+    if (fixturesPath) {
+      const resolvedPath = path.isAbsolute(fixturesPath)
+        ? fixturesPath
+        : path.resolve(process.cwd(), fixturesPath);
+      this.veloraSwapFixtures = this.loadVeloraSwapFixtures(resolvedPath);
+      this.logger.info(
+        `${this.dexKey}-${this.network}: loaded ${this.veloraSwapFixtures.size} Velora /swap fixtures from ${resolvedPath}`,
+      );
+    } else if (this.veloraSwapFixturesStrict) {
+      throw new Error(
+        `${this.dexKey}-${this.network}: ${VELORA_SWAP_FIXTURES_STRICT_ENV}=1 requires ${VELORA_SWAP_FIXTURES_PATH_ENV} to be set`,
+      );
+    }
   }
 
   // Initialize pricing is called once in the start of
@@ -387,36 +422,37 @@ export class SeamlessProtocol
   }): Promise<[Address, NumberAsString, string][]> {
     if (params.flashLoanAmount === 0n) return [];
 
+    const fixtureKey = this.buildVeloraSwapFixtureKey({
+      srcToken: params.debtToken,
+      destToken: params.collateralToken,
+      amount: params.flashLoanAmount,
+      userAddress: params.multicallExecutor,
+      receiver: params.multicallExecutor,
+      slippageBps: INTERNAL_SWAP_SLIPPAGE_BPS,
+      excludeDEXS: INTERNAL_SWAP_EXCLUDE_DEXS,
+    });
+    const cached = this.veloraSwapCallsCache.get(fixtureKey);
+    if (cached) return cached;
+
     const augustusV6 = this.augustusV6Address;
     if (!augustusV6) {
       throw new Error(`${this.dexKey} missing augustusV6Address in config`);
     }
 
-    const srcDecimals = await this.getTokenDecimals(params.debtToken);
-    const destDecimals = await this.getTokenDecimals(params.collateralToken);
-
-    // Phase 1: use Velora Market API v6.2 /swap endpoint to build a debtAsset->collateral internal route.
-    // IMPORTANT: userAddress == receiver == multicallExecutor, because swap targets see msg.sender == multicallExecutor.
-    const { data } = await axios.get(`${this.veloraApiUrl}/swap`, {
-      params: {
-        network: this.network.toString(),
-        version: VELORE_VERSION,
-        side: SwapSide.SELL,
-        srcToken: params.debtToken,
-        srcDecimals,
-        destToken: params.collateralToken,
-        destDecimals,
-        amount: params.flashLoanAmount.toString(),
-        userAddress: params.multicallExecutor,
-        receiver: params.multicallExecutor,
-        slippage: INTERNAL_SWAP_SLIPPAGE_BPS,
-        // Keep Phase 1 conservative: avoid legs that introduce permit2 / native routing complexity.
-        excludeDEXS: 'Native,UniswapV4',
-      },
-      timeout: 30_000,
-    });
-
-    const txParams = data?.txParams;
+    let txParams = this.veloraSwapFixtures?.get(fixtureKey);
+    if (!txParams) {
+      if (this.veloraSwapFixtures && this.veloraSwapFixturesStrict) {
+        throw new Error(
+          `${this.dexKey} missing Velora /swap fixture for key=${fixtureKey}`,
+        );
+      }
+      txParams = await this.fetchVeloraSwapTxParams({
+        debtToken: params.debtToken,
+        collateralToken: params.collateralToken,
+        multicallExecutor: params.multicallExecutor,
+        flashLoanAmount: params.flashLoanAmount,
+      });
+    }
     if (!txParams?.to || !txParams?.data) {
       throw new Error(
         `${this.dexKey} invalid Velora /swap response (missing txParams.to/data)`,
@@ -451,11 +487,108 @@ export class SeamlessProtocol
       params.flashLoanAmount.toString(),
     ]);
 
-    return [
+    const calls: [Address, NumberAsString, string][] = [
       [params.debtToken, '0', approveZero],
       [params.debtToken, '0', approveAmount],
       [to, '0', String(txParams.data)],
     ];
+    this.veloraSwapCallsCache.set(fixtureKey, calls);
+    return calls;
+  }
+
+  private buildVeloraSwapFixtureKey(params: {
+    srcToken: Address;
+    destToken: Address;
+    amount: bigint;
+    userAddress: Address;
+    receiver: Address;
+    slippageBps: string;
+    excludeDEXS: string;
+  }): string {
+    return [
+      this.network.toString(),
+      VELORE_VERSION,
+      SwapSide.SELL,
+      params.srcToken.toLowerCase(),
+      params.destToken.toLowerCase(),
+      params.amount.toString(),
+      params.userAddress.toLowerCase(),
+      params.receiver.toLowerCase(),
+      params.slippageBps,
+      params.excludeDEXS,
+    ].join(':');
+  }
+
+  private loadVeloraSwapFixtures(
+    resolvedPath: string,
+  ): Map<string, VeloraSwapTxParams> {
+    const raw = fs.readFileSync(resolvedPath, 'utf8');
+    const json = JSON.parse(raw) as {
+      fixtures?: Record<string, unknown>;
+    };
+    const fixtures = json.fixtures;
+    if (!fixtures || typeof fixtures !== 'object') {
+      throw new Error(
+        `${this.dexKey}-${this.network}: invalid Velora swap fixtures file (missing 'fixtures') at ${resolvedPath}`,
+      );
+    }
+
+    const map = new Map<string, VeloraSwapTxParams>();
+    for (const [key, entry] of Object.entries(fixtures)) {
+      const maybeTx = (entry as any)?.txParams ?? entry;
+      const to = maybeTx?.to;
+      const data = maybeTx?.data;
+      const value = maybeTx?.value;
+      if (!to || !data) {
+        throw new Error(
+          `${this.dexKey}-${this.network}: invalid fixture for key=${key} (missing txParams.to/data)`,
+        );
+      }
+      map.set(key, {
+        to: String(to),
+        data: String(data),
+        value: value !== undefined ? String(value) : undefined,
+      });
+    }
+
+    return map;
+  }
+
+  private async fetchVeloraSwapTxParams(params: {
+    debtToken: Address;
+    collateralToken: Address;
+    multicallExecutor: Address;
+    flashLoanAmount: bigint;
+  }): Promise<VeloraSwapTxParams> {
+    const srcDecimals = await this.getTokenDecimals(params.debtToken);
+    const destDecimals = await this.getTokenDecimals(params.collateralToken);
+
+    // Phase 1: use Velora Market API v6.2 /swap endpoint to build a debtAsset->collateral internal route.
+    // IMPORTANT: userAddress == receiver == multicallExecutor, because swap targets see msg.sender == multicallExecutor.
+    const { data } = await axios.get(`${this.veloraApiUrl}/swap`, {
+      params: {
+        network: this.network.toString(),
+        version: VELORE_VERSION,
+        side: SwapSide.SELL,
+        srcToken: params.debtToken,
+        srcDecimals,
+        destToken: params.collateralToken,
+        destDecimals,
+        amount: params.flashLoanAmount.toString(),
+        userAddress: params.multicallExecutor,
+        receiver: params.multicallExecutor,
+        slippage: INTERNAL_SWAP_SLIPPAGE_BPS,
+        // Keep Phase 1 conservative: avoid legs that introduce permit2 / native routing complexity.
+        excludeDEXS: INTERNAL_SWAP_EXCLUDE_DEXS,
+      },
+      timeout: 30_000,
+    });
+
+    return {
+      to: String(data?.txParams?.to ?? ''),
+      data: String(data?.txParams?.data ?? ''),
+      value: data?.txParams?.value,
+    };
   }
 
   // This is called once before getTopPoolsForToken is

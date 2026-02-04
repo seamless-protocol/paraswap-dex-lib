@@ -206,6 +206,19 @@ TENDERLY_PROJECT=...
 # Defaults to https://api.paraswap.io if unset.
 VELORA_API_URL=https://api.paraswap.io
 
+# Optional: freeze Velora `/swap` responses for deterministic E2E.
+# When set, SeamlessProtocol will load fixtures from this file and use them instead of calling the live API.
+SEAMLESS_VELORA_SWAP_FIXTURES_PATH=tests/fixtures/seamless-protocol/velora-swap.json
+# If set to `1`, missing fixtures are a hard error (no fallback to live API).
+SEAMLESS_VELORA_SWAP_FIXTURES_STRICT=0
+
+# Optional: pin block number in E2E (keeps previewDeposit + fixture keys in sync).
+SEAMLESS_E2E_PINNED_BLOCK_NUMBER=24363228
+
+# Optional: freeze ParaSwap `/prices` (getRate) response used by SeamlessProtocol E2E test 3 (USDC -> wstETH leg).
+# When set, the test will load the fixture instead of calling the live ParaSwap API.
+SEAMLESS_PARASWAP_RATE_FIXTURE_PATH=tests/fixtures/seamless-protocol/paraswap-rate-usdc-wsteth.json
+
 # If you want DexLib to price and route through the local SeamlessProtocol module:
 # - unset E2E_TEST_ENDPOINT, OR
 # - pass poolIdentifiers to testE2E(...)

@@ -3,6 +3,8 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import axios from 'axios';
+import * as fs from 'fs';
+import * as path from 'path';
 import { LocalParaswapSDK } from '../../implementations/local-paraswap-sdk';
 import { DummyDexHelper } from '../../dex-helper';
 import { DexAdapterService } from '../../dex';
@@ -44,6 +46,26 @@ describe('SeamlessProtocol E2E', () => {
 
     jest.setTimeout(120 * 1000);
 
+    const fixturesPath =
+      process.env.SEAMLESS_VELORA_SWAP_FIXTURES_PATH ??
+      path.resolve(
+        process.cwd(),
+        'tests/fixtures/seamless-protocol/velora-swap.json',
+      );
+
+    const paraswapRateFixturePath =
+      process.env.SEAMLESS_PARASWAP_RATE_FIXTURE_PATH ??
+      path.resolve(
+        process.cwd(),
+        'tests/fixtures/seamless-protocol/paraswap-rate-usdc-wsteth.json',
+      );
+
+    // This block is used to keep Seamless previewDeposit and the frozen Velora /swap fixture in sync.
+    // If you update the fixture, update this block too.
+    const pinnedBlockNumber = Number(
+      process.env.SEAMLESS_E2E_PINNED_BLOCK_NUMBER ?? '24363228',
+    );
+
     const stringifyWithBigInt = (obj: unknown) =>
       JSON.stringify(
         obj,
@@ -82,12 +104,25 @@ describe('SeamlessProtocol E2E', () => {
       srcSymbol: string,
       destSymbol: string,
       amount: bigint,
+      opts?: { pinBlockNumber?: number; strictVeloraFixtures?: boolean },
     ) {
       const poolId = `${dexKey}_${tokens[destSymbol].address.toLowerCase()}`;
       const poolIdentifiers = { [dexKey]: [poolId] };
 
       // Force LocalParaswapSDK (no ParaSwap public API) and pin execution to the local SeamlessProtocol module.
+      process.env.SEAMLESS_VELORA_SWAP_FIXTURES_PATH = fixturesPath;
+      process.env.SEAMLESS_VELORA_SWAP_FIXTURES_STRICT =
+        opts?.strictVeloraFixtures ? '1' : '0';
+
       const sdk = new LocalParaswapSDK(network, dexKey, '');
+      const blockToPin = opts?.pinBlockNumber;
+      if (blockToPin !== undefined) {
+        // LocalParaswapSDK internally calls both web3 and ethers providers for block number.
+        // Patch both so quote + simulation use a consistent pinned block.
+        (sdk.dexHelper.provider as any).getBlockNumber = async () => blockToPin;
+        (sdk.dexHelper.web3Provider.eth as any).getBlockNumber = async () =>
+          blockToPin;
+      }
       await sdk.initializePricing();
 
       const priceRoute = await sdk.getPrices(
@@ -205,7 +240,10 @@ describe('SeamlessProtocol E2E', () => {
     };
 
     it('1. Check Swap CollateralToken to LeverageToken: wstETH to WSTETH-ETH-25x', async () => {
-      await simulateE2E('wstETH', 'WSTETH-ETH-25x', 10n ** 19n);
+      await simulateE2E('wstETH', 'WSTETH-ETH-25x', 10n ** 19n, {
+        pinBlockNumber: pinnedBlockNumber,
+        strictVeloraFixtures: true,
+      });
     });
 
     it.skip('2. Check Swap LeverageToken to CollateralToken: WSTETH-ETH-25x to wstETH', async () => {
@@ -214,43 +252,43 @@ describe('SeamlessProtocol E2E', () => {
     });
 
     it('3. Check Swap AnyToken to LeverageToken: USDC to WSTETH-ETH-25x', async () => {
+      // Phase 1 deterministic path:
+      // - USDC->wstETH leg is frozen via a ParaSwap /prices fixture (no live API call)
+      // - internal leverage swap (/swap, debtAsset->collateral) is frozen via Velora /swap fixtures
+      process.env.SEAMLESS_VELORA_SWAP_FIXTURES_PATH = fixturesPath;
+      process.env.SEAMLESS_VELORA_SWAP_FIXTURES_STRICT = '1';
+
       const tenderlySimulator = TenderlySimulator.getInstance();
       const userAddress = TenderlySimulator.DEFAULT_OWNER;
       const stateOverride: StateOverride = {};
 
-      // 1) Get USDC -> wstETH via ParaSwap API (Velora routing engine) for realism.
-      //    NOTE: API `blockNumber` can be ahead of our RPC head (e.g. when using a fixed/block-pinned fork RPC),
-      //    so we pin all onchain reads + the simulation to the RPC head block.
-      const apiURL = process.env.E2E_TEST_ENDPOINT ?? 'https://api.paraswap.io';
-      const paraSwap = constructSimpleSDK({
-        version: ParaSwapVersion.V6,
-        chainId: network,
-        axios,
-        apiURL,
-      });
+      // 1) Load a frozen ParaSwap /prices (getRate) fixture for USDC -> wstETH.
+      //    This keeps the intermediate wstETH output (and therefore the Seamless flashLoanAmount) deterministic.
+      const fixture = JSON.parse(
+        fs.readFileSync(paraswapRateFixturePath, 'utf8'),
+      );
+      const usdcRoute = fixture?.priceRoute;
+      assert(usdcRoute, 'Missing priceRoute in ParaSwap rate fixture');
+      assert(
+        Array.isArray(usdcRoute.bestRoute) && usdcRoute.bestRoute.length > 0,
+        'Fixture route missing bestRoute',
+      );
+
+      const pinnedBlockNumber = Number(usdcRoute.blockNumber);
+      assert(
+        Number.isFinite(pinnedBlockNumber) && pinnedBlockNumber > 0,
+        `Invalid pinnedBlockNumber from fixture: ${usdcRoute.blockNumber}`,
+      );
 
       const dexHelper = new DummyDexHelper(network);
-      const pinnedBlockNumber =
-        await dexHelper.web3Provider.eth.getBlockNumber();
 
       const usdcIn = 3_000n * 10n ** 6n; // 3,000 USDC
-      const usdcRoute = (await paraSwap.swap.getRate({
-        srcToken: tokens['USDC'].address,
-        destToken: tokens['wstETH'].address,
-        side: SwapSide.SELL,
-        amount: usdcIn.toString(),
-        options: {
-          // Avoid RFQ/native legs that require preProcessTransaction (txRequest) which this test does not run.
-          // Also avoid UniswapV4 paths in this E2E: V4 legs can introduce permit2/wrapping complexity that is not the
-          // focus of the Seamless venue integration.
-          excludeDEXS: ['Native', 'UniswapV4'],
-          includeContractMethods: [ContractMethod.swapExactAmountIn],
-          partner: 'any',
-          maxImpact: 100,
-        },
-        srcDecimals: tokens['USDC'].decimals,
-        destDecimals: tokens['wstETH'].decimals,
-      })) as any;
+      assert(
+        BigInt(usdcRoute.srcAmount) === usdcIn,
+        `Fixture srcAmount mismatch (expected ${usdcIn.toString()}, got ${
+          usdcRoute.srcAmount
+        })`,
+      );
 
       // 2) Quote wstETH -> LT (SeamlessProtocol) at the pinned blockNumber so flashLoanAmount is consistent.
       const seamless = new SeamlessProtocol(network, dexKey, dexHelper);
@@ -267,11 +305,6 @@ describe('SeamlessProtocol E2E', () => {
       //    NOTE: The ParaSwap V6 executor will treat the API swaps as intermediate legs (recipient=executor) and the
       //    Seamless leg as the last leg (recipient=augustus). Without the wrapper venue target, this would strand
       //    minted shares on the executor and revert in simulation.
-      assert(
-        Array.isArray(usdcRoute.bestRoute) && usdcRoute.bestRoute.length > 0,
-        'API route missing bestRoute',
-      );
-
       let totalLtOut = 0n;
       const composedBestRoute = await Promise.all(
         usdcRoute.bestRoute.map(async (route: any) => {

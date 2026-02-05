@@ -239,10 +239,12 @@ Goal: a stable, view-only quote surface that:
 
 Implementation path (Phase 2+):
 
-1. **Extend `DexLeverageRouter` with view-only quote helpers** (preferred first step; implemented in `seamless-intents`).
-   - Pros: reuses the same “venue surface” contract shape and avoids another deployment/address to manage initially.
-   - Cons: requires redeploying the wrapper to expose new quote methods.
-2. (Optional) **Extract a standalone `SeamlessLTQuoter`** if we want a dedicated quote address decoupled from execution.
+1. **Integrate the view-only quote helpers already implemented in `DexLeverageRouter`** (implemented in
+   `seamless-intents/src/velora/DexLeverageRouter.sol` and deployed on mainnet at `0x03926d5E...`).
+   - Pros: reuse the same “venue surface” contract and avoid another deployment/address initially.
+   - Cons: quote surface evolution requires redeploying the wrapper.
+2. (Optional) **Extract a standalone `SeamlessLTQuoter`** if we want a dedicated quote address decoupled from
+   execution/upgrade cadence.
 
 Minimum interface to support future BUY + redeem:
 

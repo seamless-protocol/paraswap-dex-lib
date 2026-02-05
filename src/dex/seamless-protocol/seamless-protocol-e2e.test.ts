@@ -67,7 +67,6 @@ describe('SeamlessProtocol E2E', () => {
     // This block is used to keep Seamless previewDeposit and the frozen Velora /swap fixture in sync.
     // If you update the fixture, update this block too.
     const pinnedBlockNumber = Number(
-      // Must be >= DexLeverageRouter deployment block (see docs); otherwise the Seamless leg cannot execute.
       process.env.SEAMLESS_E2E_PINNED_BLOCK_NUMBER ?? '24387094',
     );
 
@@ -324,8 +323,8 @@ describe('SeamlessProtocol E2E', () => {
       // 3) Compose a synthetic multi-leg ParaSwap route:
       //    USDC -> wstETH (API) then wstETH -> LT (local SeamlessProtocol) appended to each bestRoute path.
       //    NOTE: The ParaSwap V6 executor will treat the API swaps as intermediate legs (recipient=executor) and the
-      //    Seamless leg as the last leg (recipient=augustus). Without the wrapper venue target, this would strand
-      //    minted shares on the executor and revert in simulation.
+      //    Seamless leg as the last leg. With dexFuncHasRecipient=false, the executor will append the final transfer
+      //    of LT shares to Augustus.
       let totalLtOut = 0n;
       const composedBestRoute = await Promise.all(
         usdcRoute.bestRoute.map(async (route: any) => {

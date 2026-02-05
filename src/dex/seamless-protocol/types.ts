@@ -13,7 +13,7 @@ export type SeamlessProtocolData = {
   amountIn: bigint;
   // Expected output amount at pricing time (used for approval sizing fallback in tx building).
   amountOut: bigint;
-  // Previewed debt (debtToken units) at the pricing block.
+  // Previewed debt (debtToken units) at the pricing block (raw, no buffer).
   // MUST correspond to amountIn (see doc: validate BigInt(srcAmount) == amountIn).
   flashLoanAmount: bigint;
 };
@@ -24,10 +24,8 @@ export type SeamlessCore = {
 
 export type SeamlessPeriphery = {
   multicallExecutor: Address;
-  // Gate 0 (optional): used only for swapCalls encoding validation.
+  // LeverageRouter is the native execution surface for mint/redeem.
   leverageRouter?: Address;
-  // Gate 1 (required): ParaSwap venue call target (thin wrapper around LeverageRouter with explicit recipient + return value).
-  dexLeverageRouter?: Address;
 };
 
 export type SeamlessLeverageToken = {

@@ -3,9 +3,6 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { Interface, Result } from '@ethersproject/abi';
-import axios from 'axios';
-import * as fs from 'fs';
-import * as path from 'path';
 import { DummyDexHelper } from '../../dex-helper/index';
 import { Network, SwapSide, UNLIMITED_USD_LIQUIDITY } from '../../constants';
 import { BI_POWS } from '../../bigint-constants';
@@ -17,7 +14,8 @@ import {
 } from '../../../tests/utils';
 import { Tokens } from '../../../tests/constants-e2e';
 import { SeamlessProtocolConfig } from './config';
-import DEX_LEVERAGE_ROUTER_ABI from '../../abi/seamless-protocol/DexLeverageRouter.json';
+import LEVERAGE_ROUTER_ABI from '../../abi/seamless-protocol/LeverageRouter.json';
+import LEVERAGE_MANAGER_ABI from '../../abi/seamless-protocol/LeverageManager.json';
 import { formatUnits } from '@ethersproject/units';
 
 /*
@@ -35,148 +33,240 @@ import { formatUnits } from '@ethersproject/units';
   (This comment should be removed from the final implementation)
 */
 
-function getQuoterCalldata(
-  exchangeAddress: string,
-  readerIface: Interface,
-  leverageToken: string,
+type ActionData = {
+  collateral: bigint;
+  debt: bigint;
+  shares: bigint;
+  tokenFee: bigint;
+  treasuryFee: bigint;
+};
+
+const MAX_BRACKET_ITERATIONS = 64;
+const MAX_BINARY_SEARCH_ITERATIONS = 128;
+const MAX_UINT256 = (1n << 256n) - 1n;
+
+const leverageRouterIface = new Interface(LEVERAGE_ROUTER_ABI);
+const leverageManagerIface = new Interface(LEVERAGE_MANAGER_ABI);
+
+const toBigInt = (value: unknown): bigint => {
+  if (typeof value === 'bigint') return value;
+  if (typeof value === 'number') return BigInt(value);
+  if (typeof value === 'string') return BigInt(value);
+  if (value && typeof (value as any).toString === 'function') {
+    return BigInt((value as any).toString());
+  }
+  return 0n;
+};
+
+const decodeActionData = (raw: any): ActionData => ({
+  collateral: toBigInt(raw?.collateral ?? raw?.[0]),
+  debt: toBigInt(raw?.debt ?? raw?.[1]),
+  shares: toBigInt(raw?.shares ?? raw?.[2]),
+  tokenFee: toBigInt(raw?.tokenFee ?? raw?.[3]),
+  treasuryFee: toBigInt(raw?.treasuryFee ?? raw?.[4]),
+});
+
+const applyBpsCeil = (amount: bigint, bps: bigint): bigint => {
+  if (amount === 0n || bps === 0n) return amount;
+  return (amount * (BPS_SCALE + bps) + (BPS_SCALE - 1n)) / BPS_SCALE;
+};
+const applyBpsFloor = (amount: bigint, bps: bigint): bigint => {
+  if (amount === 0n || bps === 0n) return amount;
+  if (bps >= BPS_SCALE) return 0n;
+  return (amount * (BPS_SCALE - bps)) / BPS_SCALE;
+};
+
+async function previewDepositAction(
+  seamlessProtocol: SeamlessProtocol,
   leverageRouter: string,
-  amounts: bigint[],
-  funcName: string,
-) {
-  return amounts.map(amount => ({
-    target: exchangeAddress,
-    callData: readerIface.encodeFunctionData(funcName, [
-      leverageToken,
-      amount.toString(),
-      leverageRouter,
-    ]),
-  }));
+  leverageToken: string,
+  collateralFromSender: bigint,
+  blockNumber: number,
+): Promise<ActionData> {
+  const callData = leverageRouterIface.encodeFunctionData('previewDeposit', [
+    leverageToken,
+    collateralFromSender.toString(),
+  ]);
+  const result = await seamlessProtocol.dexHelper.multiContract.methods
+    .aggregate([{ target: leverageRouter, callData }])
+    .call({}, blockNumber);
+  const decoded = leverageRouterIface.decodeFunctionResult(
+    'previewDeposit',
+    result.returnData[0],
+  );
+  return decodeActionData(decoded[0]);
 }
 
-function decodeQuoteResult(
-  results: Result,
-  readerIface: Interface,
-  funcName: string,
-) {
-  return results.map(result => {
-    const parsed = readerIface.decodeFunctionResult(funcName, result);
-    let flashLoanIndex = 0;
-    if (
-      funcName === 'quoteMintFromCollateralExactIn' ||
-      funcName === 'quoteMintFromCollateralExactOut'
-    ) {
-      flashLoanIndex = 3;
-    } else if (
-      funcName === 'quoteRedeemToCollateralExactIn' ||
-      funcName === 'quoteRedeemToCollateralExactOut'
-    ) {
-      flashLoanIndex = 2;
-    }
-    return {
-      price: BigInt(parsed[0].toString()),
-      flashLoanAmount:
-        flashLoanIndex > 0 ? BigInt(parsed[flashLoanIndex].toString()) : 0n,
+async function quoteMintExactOut(
+  seamlessProtocol: SeamlessProtocol,
+  leverageRouter: string,
+  leverageToken: string,
+  sharesOut: bigint,
+  blockNumber: number,
+): Promise<{
+  collateralFromSender: bigint;
+  action: ActionData;
+  rawFlashLoanAmount: bigint;
+  flashLoanAmount: bigint;
+}> {
+  if (sharesOut === 0n) {
+    const zeroAction: ActionData = {
+      collateral: 0n,
+      debt: 0n,
+      shares: 0n,
+      tokenFee: 0n,
+      treasuryFee: 0n,
     };
+    return {
+      collateralFromSender: 0n,
+      action: zeroAction,
+      rawFlashLoanAmount: 0n,
+      flashLoanAmount: 0n,
+    };
+  }
+
+  let low = 0n;
+  let high = sharesOut;
+  let action = await previewDepositAction(
+    seamlessProtocol,
+    leverageRouter,
+    leverageToken,
+    high,
+    blockNumber,
+  );
+
+  for (let i = 0; action.shares < sharesOut; i++) {
+    if (i >= MAX_BRACKET_ITERATIONS) {
+      throw new Error(`quoteMintExactOut: bracket exceeded (${i})`);
+    }
+    low = high + 1n;
+    if (high > MAX_UINT256 / 2n) {
+      throw new Error(`quoteMintExactOut: overflow`);
+    }
+    high = high * 2n;
+    action = await previewDepositAction(
+      seamlessProtocol,
+      leverageRouter,
+      leverageToken,
+      high,
+      blockNumber,
+    );
+  }
+
+  for (let i = 0; low < high; i++) {
+    if (i >= MAX_BINARY_SEARCH_ITERATIONS) {
+      throw new Error(`quoteMintExactOut: search exceeded (${i})`);
+    }
+    const mid = low + (high - low) / 2n;
+    const midPreview = await previewDepositAction(
+      seamlessProtocol,
+      leverageRouter,
+      leverageToken,
+      mid,
+      blockNumber,
+    );
+    if (midPreview.shares >= sharesOut) {
+      high = mid;
+      action = midPreview;
+    } else {
+      low = mid + 1n;
+    }
+  }
+
+  const collateralFromSender = low;
+  action = await previewDepositAction(
+    seamlessProtocol,
+    leverageRouter,
+    leverageToken,
+    collateralFromSender,
+    blockNumber,
+  );
+
+  const rawFlashLoanAmount = action.debt;
+  const flashLoanAmount = rawFlashLoanAmount;
+
+  return {
+    collateralFromSender,
+    action,
+    rawFlashLoanAmount,
+    flashLoanAmount,
+  };
+}
+
+async function batchPreviewActions(params: {
+  seamlessProtocol: SeamlessProtocol;
+  target: string;
+  iface: Interface;
+  funcName: 'previewDeposit' | 'previewRedeem' | 'previewWithdraw';
+  leverageToken: string;
+  amounts: bigint[];
+  blockNumber: number;
+}): Promise<ActionData[]> {
+  const { seamlessProtocol, target, iface, funcName, leverageToken, amounts } =
+    params;
+  const actions: ActionData[] = new Array(amounts.length).fill({
+    collateral: 0n,
+    debt: 0n,
+    shares: 0n,
+    tokenFee: 0n,
+    treasuryFee: 0n,
   });
+
+  const calls: Array<{ target: string; callData: string }> = [];
+  const indices: number[] = [];
+
+  amounts.forEach((amount, idx) => {
+    if (amount === 0n) return;
+    indices.push(idx);
+    calls.push({
+      target,
+      callData: iface.encodeFunctionData(funcName, [
+        leverageToken,
+        amount.toString(),
+      ]),
+    });
+  });
+
+  if (calls.length === 0) return actions;
+
+  const result = await seamlessProtocol.dexHelper.multiContract.methods
+    .aggregate(calls)
+    .call({}, params.blockNumber);
+
+  result.returnData.forEach((returnData: Result, i: number) => {
+    const decoded = iface.decodeFunctionResult(funcName, returnData);
+    actions[indices[i]] = decodeActionData(decoded[0]);
+  });
+
+  return actions;
 }
 
 const INTERNAL_SWAP_SLIPPAGE_BPS = '100';
-const INTERNAL_SWAP_EXCLUDE_DEXS = 'Native,UniswapV4';
-const VELORE_VERSION = '6.2';
-const DEFAULT_VELORA_API_URL = 'https://api.paraswap.io';
-let veloraFixturesCache: Record<string, any> | null = null;
-
-function buildVeloraSwapFixtureKey(params: {
-  network: Network;
-  side: SwapSide;
-  srcToken: string;
-  destToken: string;
-  amount: bigint;
-  userAddress: string;
-  receiver: string;
-}) {
-  return [
-    params.network.toString(),
-    VELORE_VERSION,
-    params.side,
-    params.srcToken.toLowerCase(),
-    params.destToken.toLowerCase(),
-    params.amount.toString(),
-    params.userAddress.toLowerCase(),
-    params.receiver.toLowerCase(),
-    INTERNAL_SWAP_SLIPPAGE_BPS,
-    INTERNAL_SWAP_EXCLUDE_DEXS,
-  ].join(':');
-}
-
-async function getVeloraSwapSrcAmount(params: {
-  network: Network;
-  side: SwapSide;
-  srcToken: string;
-  destToken: string;
-  amount: bigint;
-  userAddress: string;
-  receiver: string;
-  srcDecimals: number;
-  destDecimals: number;
-}) {
-  const fixturesPath =
-    process.env.SEAMLESS_VELORA_SWAP_FIXTURES_PATH ??
-    path.resolve(
-      process.cwd(),
-      'tests/fixtures/seamless-protocol/velora-swap.json',
-    );
-  const fixtureKey = buildVeloraSwapFixtureKey(params);
-
-  if (fs.existsSync(fixturesPath)) {
-    if (!veloraFixturesCache) {
-      veloraFixturesCache =
-        JSON.parse(fs.readFileSync(fixturesPath, 'utf8')).fixtures ?? {};
-    }
-    const entry = veloraFixturesCache[fixtureKey];
-    const srcAmount =
-      entry?.srcAmount ??
-      entry?.txParams?.srcAmount ??
-      entry?.priceRoute?.srcAmount;
-    if (srcAmount) return BigInt(srcAmount.toString());
+const BPS_SCALE = 10_000n;
+const INTERNAL_SWAP_BUFFER_BPS = (() => {
+  const raw =
+    process.env.SEAMLESS_INTERNAL_SWAP_BUFFER_BPS ?? INTERNAL_SWAP_SLIPPAGE_BPS;
+  try {
+    const parsed = BigInt(raw);
+    return parsed < 0n ? 0n : parsed;
+  } catch {
+    return BigInt(INTERNAL_SWAP_SLIPPAGE_BPS);
   }
-
-  const veloraApiUrl =
-    process.env.VELORA_API_URL ||
-    process.env.SEAMLESS_VELORA_API_URL ||
-    DEFAULT_VELORA_API_URL;
-  const { data } = await axios.get(`${veloraApiUrl}/swap`, {
-    params: {
-      network: params.network.toString(),
-      version: VELORE_VERSION,
-      side: params.side,
-      srcToken: params.srcToken,
-      srcDecimals: params.srcDecimals,
-      destToken: params.destToken,
-      destDecimals: params.destDecimals,
-      amount: params.amount.toString(),
-      userAddress: params.userAddress,
-      receiver: params.receiver,
-      slippage: INTERNAL_SWAP_SLIPPAGE_BPS,
-      excludeDEXS: INTERNAL_SWAP_EXCLUDE_DEXS,
-    },
-    timeout: 30_000,
-  });
-
-  const srcAmount =
-    data?.srcAmount ?? data?.priceRoute?.srcAmount ?? data?.txParams?.srcAmount;
-  return srcAmount ? BigInt(srcAmount.toString()) : null;
-}
+})();
 
 async function checkOnChainPricing(
   seamlessProtocol: SeamlessProtocol,
-  dexLeverageRouterAddress: string,
   leverageRouterAddress: string,
+  leverageManagerAddress: string,
   leverageToken: string,
   blockNumber: number,
   prices: bigint[],
   amounts: bigint[],
-  funcName: string,
+  quoteMode:
+    | 'mintExactIn'
+    | 'mintExactOut'
+    | 'redeemExactIn'
+    | 'redeemExactOut',
   opts?: {
     network?: Network;
     side?: SwapSide;
@@ -186,64 +276,85 @@ async function checkOnChainPricing(
     isRedeem?: boolean;
   },
 ) {
-  const readerIface = new Interface(DEX_LEVERAGE_ROUTER_ABI);
-  const readerCallData = getQuoterCalldata(
-    dexLeverageRouterAddress,
-    readerIface,
-    leverageToken,
-    leverageRouterAddress,
-    amounts.slice(1),
-    funcName,
-  );
-  const readerResult = (
-    await seamlessProtocol.dexHelper.multiContract.methods
-      .aggregate(readerCallData)
-      .call({}, blockNumber)
-  ).returnData;
+  const expectedPrices: bigint[] = new Array(amounts.length).fill(0n);
+  const flashLoans: bigint[] = new Array(amounts.length).fill(0n);
 
-  const decoded = decodeQuoteResult(readerResult, readerIface, funcName);
-  const expectedPrices = [0n].concat(decoded.map(d => d.price));
-  const flashLoans = [0n].concat(decoded.map(d => d.flashLoanAmount));
+  if (quoteMode === 'mintExactIn') {
+    const actions = await batchPreviewActions({
+      seamlessProtocol,
+      target: leverageRouterAddress,
+      iface: leverageRouterIface,
+      funcName: 'previewDeposit',
+      leverageToken,
+      amounts,
+      blockNumber,
+    });
+    actions.forEach((action, idx) => {
+      if (amounts[idx] === 0n) return;
+      expectedPrices[idx] = action.shares;
+      flashLoans[idx] = action.debt;
+    });
+  } else if (quoteMode === 'mintExactOut') {
+    for (let i = 0; i < amounts.length; i++) {
+      const sharesOut = amounts[i];
+      if (sharesOut === 0n) continue;
+      const quote = await quoteMintExactOut(
+        seamlessProtocol,
+        leverageRouterAddress,
+        leverageToken,
+        sharesOut,
+        blockNumber,
+      );
+      expectedPrices[i] = quote.collateralFromSender;
+      flashLoans[i] = quote.rawFlashLoanAmount;
+    }
+  } else if (quoteMode === 'redeemExactIn') {
+    const actions = await batchPreviewActions({
+      seamlessProtocol,
+      target: leverageManagerAddress,
+      iface: leverageManagerIface,
+      funcName: 'previewRedeem',
+      leverageToken,
+      amounts,
+      blockNumber,
+    });
+    actions.forEach((action, idx) => {
+      if (amounts[idx] === 0n) return;
+      expectedPrices[idx] = action.collateral;
+      flashLoans[idx] = action.debt;
+    });
+  } else {
+    const actions = await batchPreviewActions({
+      seamlessProtocol,
+      target: leverageManagerAddress,
+      iface: leverageManagerIface,
+      funcName: 'previewWithdraw',
+      leverageToken,
+      amounts,
+      blockNumber,
+    });
+    actions.forEach((action, idx) => {
+      if (amounts[idx] === 0n) return;
+      expectedPrices[idx] = action.shares;
+      flashLoans[idx] = action.debt;
+    });
+  }
 
-  if (opts?.isRedeem && opts.side && opts.network) {
-    const lastIdx = amounts.length - 1;
-    const lastFlash = flashLoans[lastIdx] ?? 0n;
-    if (
-      lastFlash > 0n &&
-      opts.collateralToken &&
-      opts.debtToken &&
-      opts.multicallExecutor
-    ) {
-      const swapCostLast = await getVeloraSwapSrcAmount({
-        network: opts.network,
-        side: SwapSide.BUY,
-        srcToken: opts.collateralToken.address,
-        destToken: opts.debtToken.address,
-        amount: lastFlash,
-        userAddress: opts.multicallExecutor,
-        receiver: opts.multicallExecutor,
-        srcDecimals: opts.collateralToken.decimals,
-        destDecimals: opts.debtToken.decimals,
-      });
-
-      if (swapCostLast && swapCostLast > 0n) {
-        for (let i = 0; i < amounts.length; i++) {
-          if (amounts[i] === 0n) continue;
-          const flashLoanAmount = flashLoans[i] ?? 0n;
-          if (flashLoanAmount === 0n) continue;
-          const estimatedCost = (flashLoanAmount * swapCostLast) / lastFlash;
-
-          if (opts.side === SwapSide.SELL) {
-            expectedPrices[i] =
-              expectedPrices[i] > estimatedCost
-                ? expectedPrices[i] - estimatedCost
-                : 0n;
-          } else {
-            const desiredOut = amounts[i];
-            const grossOut = desiredOut + estimatedCost;
-            expectedPrices[i] =
-              (expectedPrices[i] * grossOut + desiredOut - 1n) / desiredOut;
-          }
+  if (opts?.isRedeem && opts.side) {
+    if (INTERNAL_SWAP_BUFFER_BPS > 0n) {
+      for (let i = 0; i < amounts.length; i++) {
+        if (amounts[i] === 0n) continue;
+        if (opts.side === SwapSide.SELL) {
+          expectedPrices[i] = applyBpsFloor(
+            expectedPrices[i],
+            INTERNAL_SWAP_BUFFER_BPS,
+          );
+        } else {
+          expectedPrices[i] = applyBpsCeil(
+            expectedPrices[i],
+            INTERNAL_SWAP_BUFFER_BPS,
+          );
+          flashLoans[i] = applyBpsCeil(flashLoans[i], INTERNAL_SWAP_BUFFER_BPS);
         }
       }
     }
@@ -263,8 +374,12 @@ async function testPricingOnNetwork(
   amounts: bigint[],
   leverageTokenAddress: string,
   leverageRouterAddress: string,
-  dexLeverageRouterAddress: string,
-  quoteFuncName: string,
+  leverageManagerAddress: string,
+  quoteMode:
+    | 'mintExactIn'
+    | 'mintExactOut'
+    | 'redeemExactIn'
+    | 'redeemExactOut',
   opts?: {
     isRedeem?: boolean;
     collateralToken?: { address: string; decimals: number };
@@ -302,13 +417,13 @@ async function testPricingOnNetwork(
   // Check if onchain pricing equals to calculated ones
   await checkOnChainPricing(
     seamlessProtocol,
-    dexLeverageRouterAddress,
     leverageRouterAddress,
+    leverageManagerAddress,
     leverageTokenAddress,
     blockNumber,
     poolPrices![0].prices,
     amounts,
-    quoteFuncName,
+    quoteMode,
     opts
       ? {
           ...opts,
@@ -476,10 +591,9 @@ describe('SeamlessProtocol', function () {
         ];
 
         const leverageRouterAddress = market.seamlessPeriphery.leverageRouter;
-        const dexLeverageRouterAddress =
-          market.seamlessPeriphery.dexLeverageRouter;
+        const leverageManagerAddress = market.seamlessCore.leverageManager;
         expect(leverageRouterAddress).toBeDefined();
-        expect(dexLeverageRouterAddress).toBeDefined();
+        expect(leverageManagerAddress).toBeDefined();
 
         const pricingSummary = await testPricingOnNetwork(
           seamlessProtocol,
@@ -492,8 +606,8 @@ describe('SeamlessProtocol', function () {
           sellAmounts,
           leverageToken!.address,
           leverageRouterAddress!,
-          dexLeverageRouterAddress!,
-          'quoteMintFromCollateralExactIn',
+          leverageManagerAddress!,
+          'mintExactIn',
         );
 
         const ltSymbol = getTokenSymbol(
@@ -580,10 +694,9 @@ describe('SeamlessProtocol', function () {
         ];
 
         const leverageRouterAddress = market.seamlessPeriphery.leverageRouter;
-        const dexLeverageRouterAddress =
-          market.seamlessPeriphery.dexLeverageRouter;
+        const leverageManagerAddress = market.seamlessCore.leverageManager;
         expect(leverageRouterAddress).toBeDefined();
-        expect(dexLeverageRouterAddress).toBeDefined();
+        expect(leverageManagerAddress).toBeDefined();
 
         await testPricingOnNetwork(
           seamlessProtocol,
@@ -596,8 +709,8 @@ describe('SeamlessProtocol', function () {
           buyAmounts,
           leverageToken!.address,
           leverageRouterAddress!,
-          dexLeverageRouterAddress!,
-          'quoteMintFromCollateralExactOut',
+          leverageManagerAddress!,
+          'mintExactOut',
         );
       }
     });
@@ -639,10 +752,9 @@ describe('SeamlessProtocol', function () {
         ];
 
         const leverageRouterAddress = market.seamlessPeriphery.leverageRouter;
-        const dexLeverageRouterAddress =
-          market.seamlessPeriphery.dexLeverageRouter;
+        const leverageManagerAddress = market.seamlessCore.leverageManager;
         expect(leverageRouterAddress).toBeDefined();
-        expect(dexLeverageRouterAddress).toBeDefined();
+        expect(leverageManagerAddress).toBeDefined();
 
         await testPricingOnNetwork(
           seamlessProtocol,
@@ -655,8 +767,8 @@ describe('SeamlessProtocol', function () {
           sellAmounts,
           leverageToken!.address,
           leverageRouterAddress!,
-          dexLeverageRouterAddress!,
-          'quoteRedeemToCollateralExactIn',
+          leverageManagerAddress!,
+          'redeemExactIn',
           {
             isRedeem: true,
             collateralToken: collateralToken!,
@@ -680,9 +792,14 @@ describe('SeamlessProtocol', function () {
           tokensByAddress.get(
             market.seamlessLeverageToken.leverageToken.toLowerCase(),
           ) ?? null;
+        const debtToken =
+          tokensByAddress.get(
+            market.seamlessLeverageToken.debtToken.toLowerCase(),
+          ) ?? null;
 
         expect(collateralToken).not.toBeNull();
         expect(leverageToken).not.toBeNull();
+        expect(debtToken).not.toBeNull();
 
         const unit = BI_POWS[collateralToken!.decimals];
         const buyAmounts = [
@@ -700,10 +817,9 @@ describe('SeamlessProtocol', function () {
         ];
 
         const leverageRouterAddress = market.seamlessPeriphery.leverageRouter;
-        const dexLeverageRouterAddress =
-          market.seamlessPeriphery.dexLeverageRouter;
+        const leverageManagerAddress = market.seamlessCore.leverageManager;
         expect(leverageRouterAddress).toBeDefined();
-        expect(dexLeverageRouterAddress).toBeDefined();
+        expect(leverageManagerAddress).toBeDefined();
 
         await testPricingOnNetwork(
           seamlessProtocol,
@@ -716,8 +832,8 @@ describe('SeamlessProtocol', function () {
           buyAmounts,
           leverageToken!.address,
           leverageRouterAddress!,
-          dexLeverageRouterAddress!,
-          'quoteRedeemToCollateralExactOut',
+          leverageManagerAddress!,
+          'redeemExactOut',
           {
             isRedeem: true,
             collateralToken: collateralToken!,

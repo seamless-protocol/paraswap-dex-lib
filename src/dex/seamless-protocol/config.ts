@@ -9,17 +9,12 @@ import {
 
 const DEX_KEY = 'SeamlessProtocol';
 
-// Venue target: DexLeverageRouter (recipient-aware wrapper around LeverageRouter).
-const DEX_LEVERAGE_ROUTER = '0x03926d5E64aF50b575fDba4B490863dDf26bEd58';
-// const DEX_LEVERAGE_ROUTER = '0x0966646b319c450f4842ad352cb7b7a102fd145a'; // previous mainnet deployment
-
 const MAINNET_SEAMLESS_CORE: SeamlessCore = {
   leverageManager: '0x5C37EB148D4a261ACD101e2B997A0F163Fb3E351',
 };
 const MAINNET_SEAMLESS_PERIPHERY: SeamlessPeriphery = {
   multicallExecutor: '0x16D02Ebd89988cAd1Ce945807b963aB7A9Fd22E1',
   leverageRouter: '0xb0764dE7eeF0aC69855C431334B7BC51A96E6DbA',
-  dexLeverageRouter: DEX_LEVERAGE_ROUTER,
 };
 const MAINNET_SEAMLESS_sUSDS_USDT_25x: SeamlessLeverageToken = {
   leverageToken: '0xc73CE54dBC4A02D7110F69AdF123B3DbE5B3033f',
@@ -52,7 +47,6 @@ const BASE_SEAMLESS_CORE: SeamlessCore = {
 const BASE_SEAMLESS_PERIPHERY: SeamlessPeriphery = {
   multicallExecutor: '0x9d04f65b58ced1fddef50aec8b0b3d64fe64220e',
   leverageRouter: '0xb0764dE7eeF0aC69855C431334B7BC51A96E6DbA',
-  // dexLeverageRouter: TODO (not deployed on Base yet)
 };
 const BASE_SEAMLESS_WEETH_WETH_17x: SeamlessLeverageToken = {
   leverageToken: '0xA2fceEAe99d2cAeEe978DA27bE2d95b0381dBB8c',

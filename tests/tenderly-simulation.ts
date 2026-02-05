@@ -11,6 +11,9 @@ const TENDERLY_TOKEN = process.env.TENDERLY_TOKEN!;
 const TENDERLY_ACCOUNT_ID = process.env.TENDERLY_ACCOUNT_ID!;
 const TENDERLY_PROJECT = process.env.TENDERLY_PROJECT!;
 const TENDERLY_VNET_ID = process.env.TENDERLY_VNET_ID!;
+const TENDERLY_SIMULATION_TIMEOUT_MS = Number(
+  process.env.TENDERLY_SIMULATION_TIMEOUT_MS ?? '120000',
+);
 
 interface StateObject {
   // Overrides of storage slots.
@@ -261,6 +264,7 @@ export class TenderlySimulator {
         headers: {
           'X-Access-Key': TENDERLY_TOKEN,
         },
+        timeout: TENDERLY_SIMULATION_TIMEOUT_MS,
       },
     );
 
@@ -298,6 +302,7 @@ export class TenderlySimulator {
         headers: {
           'X-Access-Key': TENDERLY_TOKEN,
         },
+        timeout: TENDERLY_SIMULATION_TIMEOUT_MS,
       },
     );
 

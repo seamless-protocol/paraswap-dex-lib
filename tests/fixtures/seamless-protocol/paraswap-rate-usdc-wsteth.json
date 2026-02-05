@@ -18,14 +18,14 @@
     }
   },
   "priceRoute": {
-    "blockNumber": 24380787,
+    "blockNumber": 24387649,
     "network": 1,
     "srcToken": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
     "srcDecimals": 6,
     "srcAmount": "3000000000",
     "destToken": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
     "destDecimals": 18,
-    "destAmount": "1079143143904361681",
+    "destAmount": "1150218225117776444",
     "bestRoute": [
       {
         "percent": 100,
@@ -37,30 +37,10 @@
             "destDecimals": 18,
             "swapExchanges": [
               {
-                "exchange": "PancakeswapV3",
-                "srcAmount": "120000000",
-                "destAmount": "52927349967411239",
-                "percent": 4,
-                "poolAddresses": ["0x1445f32d1a74872ba41f3d8cf4022e9996120b31"],
-                "poolIdentifiers": [
-                  "PancakeswapV3_0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48_0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2_100"
-                ],
-                "data": {
-                  "path": [
-                    {
-                      "tokenIn": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-                      "tokenOut": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-                      "fee": "100"
-                    }
-                  ],
-                  "gasUSD": "0.047952"
-                }
-              },
-              {
                 "exchange": "UniswapV3",
-                "srcAmount": "1380000000",
-                "destAmount": "608361812164929677",
-                "percent": 46,
+                "srcAmount": "1860000000",
+                "destAmount": "874106386267673409",
+                "percent": 62,
                 "poolAddresses": ["0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"],
                 "poolIdentifiers": [
                   "UniswapV3_0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48_0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2_500"
@@ -74,14 +54,14 @@
                       "currentFee": "500"
                     }
                   ],
-                  "gasUSD": "0.047952"
+                  "gasUSD": "0.054784"
                 }
               },
               {
                 "exchange": "UniswapV3",
-                "srcAmount": "1500000000",
-                "destAmount": "661422275716332589",
-                "percent": 50,
+                "srcAmount": "1140000000",
+                "destAmount": "535915084158762124",
+                "percent": 38,
                 "poolAddresses": ["0xe0554a476a092703abdb3ef35c80e0d76d32939f"],
                 "poolIdentifiers": [
                   "UniswapV3_0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48_0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2_100"
@@ -95,7 +75,7 @@
                       "currentFee": "100"
                     }
                   ],
-                  "gasUSD": "0.047952"
+                  "gasUSD": "0.054784"
                 }
               }
             ]
@@ -108,9 +88,9 @@
             "swapExchanges": [
               {
                 "exchange": "CurveV1Factory",
-                "srcAmount": "1216894522820779625",
-                "destAmount": "1217263502704897249",
-                "percent": 92,
+                "srcAmount": "1410021470426435533",
+                "destAmount": "1410364689706254724",
+                "percent": 100,
                 "poolAddresses": ["0x828b154032950c8ff7cf8085d841723db2696056"],
                 "poolIdentifiers": [
                   "CurveV1Factory_0x828b154032950c8ff7cf8085d841723db2696056_false"
@@ -127,35 +107,7 @@
                       "n_coins": 2
                     }
                   ],
-                  "gasUSD": "0.087986"
-                }
-              },
-              {
-                "exchange": "UniswapV2",
-                "srcAmount": "105816915027893880",
-                "destAmount": "105862050299179476",
-                "percent": 8,
-                "poolAddresses": ["0x4028DAAC072e492d34a3Afdbef0ba7e35D8b55C4"],
-                "poolIdentifiers": [
-                  "uniswapv2_0xae7ab96520de3a18e5e111b5eaab095312d7fe84_0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-                ],
-                "data": {
-                  "router": "0xF9234CB08edb93c0d4a4d4c70cC3FfD070e78e07",
-                  "path": [
-                    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-                    "0xae7ab96520de3a18e5e111b5eaab095312d7fe84"
-                  ],
-                  "factory": "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
-                  "initCode": "0x96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f",
-                  "feeFactor": 10000,
-                  "pools": [
-                    {
-                      "address": "0x4028DAAC072e492d34a3Afdbef0ba7e35D8b55C4",
-                      "fee": 30,
-                      "direction": false
-                    }
-                  ],
-                  "gasUSD": "0.035194"
+                  "gasUSD": "0.100522"
                 }
               }
             ]
@@ -168,31 +120,33 @@
             "swapExchanges": [
               {
                 "exchange": "wstETH",
-                "srcAmount": "1323125553004076725",
-                "destAmount": "1079143143904361681",
+                "srcAmount": "1410364689706254724",
+                "destAmount": "1150218225117776444",
                 "percent": 100,
                 "poolAddresses": ["0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0"],
                 "poolIdentifiers": ["wstETH"],
-                "data": { "gasUSD": "0.026396" }
+                "data": {
+                  "gasUSD": "0.030156"
+                }
               }
             ]
           }
         ]
       }
     ],
-    "gasCostUSD": "0.315756",
-    "gasCost": "717740",
+    "gasCostUSD": "0.265749",
+    "gasCost": "528740",
     "side": "SELL",
     "version": "6.2",
     "contractAddress": "0x6a000f20005980200259b80c5102003040001068",
     "tokenTransferProxy": "0x6a000f20005980200259b80c5102003040001068",
     "contractMethod": "swapExactAmountIn",
     "partnerFee": 0,
-    "srcUSD": "2998.8180000000",
-    "destUSD": "2993.1545896589",
+    "srcUSD": "2999.1660000000",
+    "destUSD": "3000.2407205795",
     "maxImpact": 100,
     "partner": "any",
     "maxImpactReached": false,
-    "hmac": "98c700fe8458a0d44d9a7ce1d0eaa033a8cf2631"
+    "hmac": "a597df5734260f73c5bca65e7a5c7d9a206e3d6f"
   }
 }

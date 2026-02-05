@@ -42,6 +42,7 @@ const INTERNAL_SWAP_SLIPPAGE_BPS = '100'; // 1%
 const INTERNAL_SWAP_EXCLUDE_DEXS = 'Native,UniswapV4';
 const VELORA_SWAP_FIXTURES_PATH_ENV = 'SEAMLESS_VELORA_SWAP_FIXTURES_PATH';
 const VELORA_SWAP_FIXTURES_STRICT_ENV = 'SEAMLESS_VELORA_SWAP_FIXTURES_STRICT';
+const VELORA_SWAP_FIXTURES_WRITE_ENV = 'SEAMLESS_VELORA_SWAP_FIXTURES_WRITE';
 const VELORA_SWAP_FIXTURES_STRICT_DEFAULT = false;
 type VeloraSwapTxParams = {
   to: Address;
@@ -68,8 +69,10 @@ export class SeamlessProtocol
   protected config: DexParams;
   private readonly veloraApiUrl: string;
   private readonly tokenDecimalsCache = new Map<string, number>();
+  private readonly veloraSwapFixturesPath?: string;
   private readonly veloraSwapFixtures?: Map<string, VeloraSwapTxParams>;
   private readonly veloraSwapFixturesStrict: boolean;
+  private readonly veloraSwapFixturesWrite: boolean;
   private readonly veloraSwapCallsCache = new Map<
     string,
     [Address, NumberAsString, string][]
@@ -102,14 +105,21 @@ export class SeamlessProtocol
     this.veloraSwapFixturesStrict =
       (process.env[VELORA_SWAP_FIXTURES_STRICT_ENV] ?? '') === '1' ||
       VELORA_SWAP_FIXTURES_STRICT_DEFAULT;
+    this.veloraSwapFixturesWrite =
+      (process.env[VELORA_SWAP_FIXTURES_WRITE_ENV] ?? '') === '1';
     const fixturesPath = process.env[VELORA_SWAP_FIXTURES_PATH_ENV];
     if (fixturesPath) {
       const resolvedPath = path.isAbsolute(fixturesPath)
         ? fixturesPath
         : path.resolve(process.cwd(), fixturesPath);
+      this.veloraSwapFixturesPath = resolvedPath;
       this.veloraSwapFixtures = this.loadVeloraSwapFixtures(resolvedPath);
       this.logger.info(
         `${this.dexKey}-${this.network}: loaded ${this.veloraSwapFixtures.size} Velora /swap fixtures from ${resolvedPath}`,
+      );
+    } else if (this.veloraSwapFixturesWrite) {
+      throw new Error(
+        `${this.dexKey}-${this.network}: ${VELORA_SWAP_FIXTURES_WRITE_ENV}=1 requires ${VELORA_SWAP_FIXTURES_PATH_ENV} to be set`,
       );
     } else if (this.veloraSwapFixturesStrict) {
       throw new Error(
@@ -440,6 +450,7 @@ export class SeamlessProtocol
     }
 
     let txParams = this.veloraSwapFixtures?.get(fixtureKey);
+    const loadedFromFixture = Boolean(txParams);
     if (!txParams) {
       if (this.veloraSwapFixtures && this.veloraSwapFixturesStrict) {
         throw new Error(
@@ -452,6 +463,9 @@ export class SeamlessProtocol
         multicallExecutor: params.multicallExecutor,
         flashLoanAmount: params.flashLoanAmount,
       });
+      if (this.veloraSwapFixturesWrite && this.veloraSwapFixturesPath) {
+        this.persistVeloraSwapFixture(fixtureKey, txParams);
+      }
     }
     if (!txParams?.to || !txParams?.data) {
       throw new Error(
@@ -493,6 +507,12 @@ export class SeamlessProtocol
       [to, '0', String(txParams.data)],
     ];
     this.veloraSwapCallsCache.set(fixtureKey, calls);
+    // Reduce log noise: only log fixture sourcing when useful during local iteration.
+    if (!loadedFromFixture) {
+      this.logger.info(
+        `${this.dexKey}-${this.network}: built internal swapCalls via live /swap (fixtureKey=${fixtureKey})`,
+      );
+    }
     return calls;
   }
 
@@ -517,6 +537,52 @@ export class SeamlessProtocol
       params.slippageBps,
       params.excludeDEXS,
     ].join(':');
+  }
+
+  private persistVeloraSwapFixture(
+    fixtureKey: string,
+    txParams: VeloraSwapTxParams,
+  ): void {
+    if (!this.veloraSwapFixturesPath) return;
+    if (!this.veloraSwapFixturesWrite) return;
+    // Never write fixtures in CI.
+    if (process.env.CI) return;
+
+    let json: any = {};
+    try {
+      json = JSON.parse(fs.readFileSync(this.veloraSwapFixturesPath, 'utf8'));
+    } catch {
+      json = {};
+    }
+
+    if (!json || typeof json !== 'object') json = {};
+    if (!json.fixtures || typeof json.fixtures !== 'object') {
+      json.fixtures = {};
+    }
+
+    if (json.fixtures[fixtureKey]) return;
+
+    json.meta = json.meta ?? {
+      notes:
+        'Velora /swap fixtures used to build SeamlessProtocol internal leverage swapCalls (debtAsset -> collateral) deterministically in E2E.',
+      keyFormat:
+        'network:version:side:srcToken:destToken:amount:userAddress:receiver:slippageBps:excludeDEXS',
+    };
+
+    // Keep a stable shape so fixtures can be migrated without changing the loader.
+    json.fixtures[fixtureKey] = { txParams };
+
+    fs.writeFileSync(
+      this.veloraSwapFixturesPath,
+      JSON.stringify(json, null, 2) + '\n',
+    );
+
+    // Update in-memory fixtures map for the current process.
+    this.veloraSwapFixtures?.set(fixtureKey, txParams);
+
+    this.logger.info(
+      `${this.dexKey}-${this.network}: wrote Velora /swap fixture key=${fixtureKey} to ${this.veloraSwapFixturesPath}`,
+    );
   }
 
   private loadVeloraSwapFixtures(
@@ -597,7 +663,8 @@ export class SeamlessProtocol
   // getTopPoolsForToken. It is optional for a DEX
   // to implement this
   async updatePoolState(): Promise<void> {
-    // TODO: complete me!
+    // Phase 1: markets are static-config driven (no event pool), so there is nothing to update here.
+    return;
   }
 
   // Returns list of top pools based on liquidity. Max
@@ -655,6 +722,9 @@ export class SeamlessProtocol
   // This is optional function in case if your implementation has acquired any resources
   // you need to release for graceful shutdown. For example, it may be any interval timer
   releaseResources(): AsyncOrSync<void> {
-    // TODO: complete me!
+    // Phase 1: best-effort cleanup to help Jest exit cleanly in long E2E runs.
+    this.tokenDecimalsCache.clear();
+    this.veloraSwapCallsCache.clear();
+    return;
   }
 }

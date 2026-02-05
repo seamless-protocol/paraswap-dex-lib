@@ -10,8 +10,8 @@ import {
 const DEX_KEY = 'SeamlessProtocol';
 
 // Phase 1 Gate 1 venue target: DexLeverageRouter (recipient-aware wrapper around LeverageRouter.deposit).
-const DEX_LEVERAGE_ROUTER = '0x0966646b319c450f4842ad352cb7b7a102fd145a';
-// const DEX_LEVERAGE_ROUTER = '0x03926d5e64af50b575fdba4b490863ddf26bed58'; // Tenderly (historical)
+const DEX_LEVERAGE_ROUTER = '0x03926d5E64aF50b575fDba4B490863dDf26bEd58';
+// const DEX_LEVERAGE_ROUTER = '0x0966646b319c450f4842ad352cb7b7a102fd145a'; // previous mainnet deployment
 
 const MAINNET_SEAMLESS_CORE: SeamlessCore = {
   leverageManager: '0x5C37EB148D4a261ACD101e2B997A0F163Fb3E351',

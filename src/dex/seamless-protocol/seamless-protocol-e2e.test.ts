@@ -46,6 +46,10 @@ describe('SeamlessProtocol E2E', () => {
 
     jest.setTimeout(120 * 1000);
 
+    // Phase 1 default: prefer Tenderly Simulation API (mainnet state) rather than VNet.
+    // VNet should be used only when you need VNet-only deployments/state.
+    const useVNetForSimulation = process.env.SEAMLESS_E2E_USE_VNET === '1';
+
     const fixturesPath =
       process.env.SEAMLESS_VELORA_SWAP_FIXTURES_PATH ??
       path.resolve(
@@ -63,7 +67,8 @@ describe('SeamlessProtocol E2E', () => {
     // This block is used to keep Seamless previewDeposit and the frozen Velora /swap fixture in sync.
     // If you update the fixture, update this block too.
     const pinnedBlockNumber = Number(
-      process.env.SEAMLESS_E2E_PINNED_BLOCK_NUMBER ?? '24363228',
+      // Must be >= DexLeverageRouter deployment block (see docs); otherwise the Seamless leg cannot execute.
+      process.env.SEAMLESS_E2E_PINNED_BLOCK_NUMBER ?? '24387094',
     );
 
     const stringifyWithBigInt = (obj: unknown) =>
@@ -210,6 +215,7 @@ describe('SeamlessProtocol E2E', () => {
 
       const { simulation } = await tenderlySimulator.simulateTransaction(
         simulationRequest,
+        /* forceSimulationAPI */ !useVNetForSimulation,
       );
 
       await sdk.releaseResources();
@@ -429,11 +435,13 @@ describe('SeamlessProtocol E2E', () => {
 
       const { simulation } = await tenderlySimulator.simulateTransaction(
         simulationRequest,
+        /* forceSimulationAPI */ !useVNetForSimulation,
       );
 
       if (!simulation.status) {
         const { transaction } = await tenderlySimulator.simulateTransaction(
           simulationRequest,
+          // Always use Simulation API for trace fetching (avoids VNet fork-block mismatch issues).
           true,
         );
         const revertCall = findRevertCall(

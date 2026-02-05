@@ -31,7 +31,7 @@ Phase 1 direction for the internal leverage swap route:
   - Augustus may retain dust on itself for some fee-transfer paths (not sweepable by Seamless).
   - We still enforce “no stranded balances” on Seamless custody addresses (wrapper/router/multicallExecutor), but we do
     not require Augustus itself to end at exact-zero.
-- Deep dive + experiments: `john-onboarding/design/dex-integration/internalLeverageSwap.md`.
+- Deep dive + experiments: `john-onboarding/design/dex-integration/InternalLeverageSwap.md`.
 
 ## Design
 
@@ -172,7 +172,7 @@ should be treated as enforceable requirements (builder assertions + tests):
   - `LeverageRouter` (as much as feasible)
 - Augustus dust is tolerated but should be measured/logged
 
-Deep dive + experiments: `john-onboarding/design/dex-integration/internalLeverageSwap.md`.
+Deep dive + experiments: `john-onboarding/design/dex-integration/InternalLeverageSwap.md`.
 
 ### Steps to move from simulations to real swaps (Phase 1 status)
 
@@ -187,28 +187,43 @@ What is already done in `paraswap-dex-lib`:
    - ABI: `src/abi/seamless-protocol/DexLeverageRouter.json`
    - Config field: `seamlessPeriphery.dexLeverageRouter` in `src/dex/seamless-protocol/config.ts`
 3. **Internal leverage swap route builder exists (Velora /swap)**
+
    - Built as multicall `swapCalls` (`approve(0)`, `approve(amount)`, `call(augustus, tx.data)`).
    - Strict fixture support:
      - `SEAMLESS_VELORA_SWAP_FIXTURES_PATH`
      - `SEAMLESS_VELORA_SWAP_FIXTURES_STRICT`
    - code: `src/dex/seamless-protocol/seamless-protocol.ts`
 
+4. **`DexLeverageRouter` is deployed on Ethereum mainnet**
+   - Mainnet Gate 1 venue target (has code): `0x03926d5E64aF50b575fDba4B490863dDf26bEd58`
+   - Deployment block number: `24387031`
+   - `src/dex/seamless-protocol/config.ts` treats this as the canonical mainnet address.
+   - **Important:** any pinned `blockNumber` used for E2E must be `>= 24387031`; otherwise the Seamless leg reverts
+     because `DexLeverageRouter` has no code yet at that block.
+
 What is still needed for _real onchain execution_ (not just simulation):
 
-1. **Deploy `DexLeverageRouter` to mainnet**
-   - Phase 1 goal is “mainnet-canonical addresses” so forks/VNets reuse the same addresses automatically.
-   - Until this exists on mainnet, any “real tx” against mainnet RPC will revert at the Seamless venue leg because
-     `targetExchange = dexLeverageRouter` must have code.
-2. **Ensure your execution environment contains the deployment**
-   - Tenderly simulation/VNet: fork a block **after** the deployment and set `TENDERLY_VNET_ID` so simulations “see”
-     the VNet state.
-   - Mainnet RPC: the contract must actually be deployed on mainnet (no state overrides).
-3. **Keep fixtures deterministic for CI**
+1. **Broadcast path**
+   - DexLib E2E uses Tenderly simulation only. A “real swap” requires broadcasting the built transaction from an EOA
+     or keeper (see `seamless-keeper/src/integrations/velora/README.md`).
+2. **Approvals + funding**
+   - The sender must hold `tokenIn` and approve the ParaSwap V6 spender/transfer proxy used by the route.
+   - For the Seamless venue leg, the ParaSwap executor calls `DexLeverageRouter.depositToRecipient(...)`, which pulls
+     collateral from `msg.sender` (the executor) — the executor must have custody at that moment (Mode 1 semantics).
+3. **Execution environment choice**
+   - For canonical mainnet addresses, prefer Tenderly Simulation API (unset `TENDERLY_VNET_ID`) so simulations use
+     mainnet state directly.
+   - Use Tenderly VNet only when you need VNet-only deployments/state; otherwise it can introduce “fork block” mismatch
+     issues.
+4. **Keep fixtures deterministic for CI**
    - CI should run with strict fixtures so internal swap calldata does not drift as routing changes.
    - Local iteration can remain non-strict (fallback to live `/swap`) until you decide to fully freeze.
+   - Optional convenience for local fixture authoring:
+     - set `SEAMLESS_VELORA_SWAP_FIXTURES_WRITE=1` to append missing `/swap` fixtures to
+       `SEAMLESS_VELORA_SWAP_FIXTURES_PATH` (do not enable in CI).
 
-Long-term: once `DexLeverageRouter` is mainnet-deployed, we can remove VNet-only address juggling and treat forks/VNets
-as pure RPC environment differences.
+Since `DexLeverageRouter` is mainnet-deployed, forks and generic Tenderly simulations can treat it as a normal onchain
+dependency (no bytecode injection required). VNets become a dev-only tool rather than a requirement.
 
 ## Future surfaces (not Phase 1)
 
@@ -222,7 +237,12 @@ Goal: a stable, view-only quote surface that:
 - matches canonical `leverage-tokens` preview semantics (no duplicated math), and
 - returns the **debt sizing signal** (`flashLoanAmount`) explicitly so offchain builders don’t guess.
 
-Proposed contract (Phase 2): `SeamlessLTQuoter` (standalone view-only contract, deployed from `seamless-intents`).
+Implementation path (Phase 2+):
+
+1. **Extend `DexLeverageRouter` with view-only quote helpers** (preferred first step; implemented in `seamless-intents`).
+   - Pros: reuses the same “venue surface” contract shape and avoids another deployment/address to manage initially.
+   - Cons: requires redeploying the wrapper to expose new quote methods.
+2. (Optional) **Extract a standalone `SeamlessLTQuoter`** if we want a dedicated quote address decoupled from execution.
 
 Minimum interface to support future BUY + redeem:
 
@@ -312,9 +332,14 @@ SEAMLESS_VELORA_SWAP_FIXTURES_PATH=tests/fixtures/seamless-protocol/velora-swap.
 # - CI: strict (`CI=true` in the test environment; E2E enables strict mode by default)
 # - local: non-strict (allows fallback to live API if a fixture is missing)
 SEAMLESS_VELORA_SWAP_FIXTURES_STRICT=0
+# If set to `1` (local only), missing fixtures are fetched from the live API and appended to
+# `SEAMLESS_VELORA_SWAP_FIXTURES_PATH` automatically.
+# Do NOT enable this in CI.
+SEAMLESS_VELORA_SWAP_FIXTURES_WRITE=0
 
 # Optional: pin block number in E2E (keeps previewDeposit + fixture keys in sync).
-SEAMLESS_E2E_PINNED_BLOCK_NUMBER=24363228
+# MUST be >= 24387031 (DexLeverageRouter deployment block).
+SEAMLESS_E2E_PINNED_BLOCK_NUMBER=24387094
 
 # Optional: freeze ParaSwap `/prices` (getRate) response used by SeamlessProtocol E2E test 3 (USDC -> wstETH leg).
 # When set, the test will load the fixture instead of calling the live ParaSwap API.
@@ -341,7 +366,48 @@ This module follows the standard DexLib test structure (integration / events / e
 
 - Integration tests validate pool discovery, pricing, and `getTopPoolsForToken`.
 - EventPool tests are intentionally skipped (EventPool disabled).
-- E2E tests execute the Gate 1 wrapper flow and assert the Tenderly simulation succeeds (recipient wiring + returnAmountPos).
+- E2E tests execute the Gate 1 wrapper flow and assert the Tenderly simulation succeeds (recipient wiring +
+  `returnAmountPos`).
+
+### What “E2E” means in this repo (important)
+
+DexLib “E2E” tests in this repository **simulate** transactions; they do **not** broadcast signed transactions to an
+RPC.
+
+There are two separate “execution surfaces” involved:
+
+1. **Onchain reads / quoting RPC**
+   - Used for ERC20 `decimals()`, `previewDeposit`, etc.
+   - Comes from `HTTP_PROVIDER_1` (DexHelper private provider).
+2. **Tenderly Simulation API (REST)**
+   - Used to “run” the transaction by simulating it against mainnet state at a pinned `block_number`, with
+     `state_objects` overrides (balances/allowances).
+   - This is what makes tests deterministic without private keys or real funding.
+   - Default path for SeamlessProtocol E2E is **Simulation API against mainnet state** (not VNet).
+
+If you want to simulate against a Tenderly VNet instead of mainnet state, you must set:
+
+- `TENDERLY_VNET_ID=<...>`
+- `SEAMLESS_E2E_USE_VNET=1`
+
+Otherwise SeamlessProtocol E2E will force Simulation API even if `TENDERLY_VNET_ID` is set.
+
+### Determinism: pinned blocks + fixtures
+
+E2E determinism hinges on keeping `blockNumber` and frozen fixtures aligned:
+
+- `DexLeverageRouter` existence: pinned block must be `>= 24387031` (deployment block).
+- Internal leverage swap route fixtures:
+  - `tests/fixtures/seamless-protocol/velora-swap.json` freezes Velora `/swap` txParams for the internal swapCalls
+    (debtAsset -> collateral).
+  - In CI, run with strict fixtures so tests never call live `/swap` (see env vars below).
+  - If you change the pinned block, `previewDeposit(...).debt` changes slightly → buffered `flashLoanAmount` changes
+    → you will need a new `/swap` fixture entry for the new key.
+- AnyToken E2E (USDC -> ... -> wstETH -> LT) also uses a frozen ParaSwap `/prices` fixture:
+  - `tests/fixtures/seamless-protocol/paraswap-rate-usdc-wsteth.json`
+  - This pins the intermediate wstETH amount _and_ provides the `blockNumber` for that test.
+  - **Fixture gotcha:** if `DexLeverageRouter` is deployed after the fixture’s `blockNumber`, the AnyToken E2E must be
+    updated with a new fixture (blockNumber must be >= deploy).
 
 ```bash
 # All integration tests for this DEX module
@@ -361,6 +427,48 @@ yarn test src/dex/seamless-protocol/seamless-protocol-integration.test.ts -t "4.
 # Gate 1 E2E (wrapper; should succeed)
 yarn test src/dex/seamless-protocol/seamless-protocol-e2e.test.ts
 ```
+
+### Required env vars (minimum for mainnet Simulation API E2E)
+
+```bash
+# Onchain reads (previewDeposit, decimals, etc.)
+HTTP_PROVIDER_1=<mainnet RPC URL>
+
+# Tenderly Simulation API (REST)
+TENDERLY_TOKEN=...
+TENDERLY_ACCOUNT_ID=...
+TENDERLY_PROJECT=...
+
+# Pinned block for the single-leg E2E (wstETH -> LT)
+# MUST be >= 24387031 (DexLeverageRouter deployment block).
+SEAMLESS_E2E_PINNED_BLOCK_NUMBER=24387094
+
+# Velora/ParaSwap API base URL used to build the *internal leverage swap route* (debtAsset -> collateral)
+VELORA_API_URL=https://api.paraswap.io
+
+# Freeze Velora /swap responses for deterministic E2E (recommended in CI)
+SEAMLESS_VELORA_SWAP_FIXTURES_PATH=tests/fixtures/seamless-protocol/velora-swap.json
+# In CI set to 1 (strict). Locally keep unset/0 to allow live `/swap` for faster iteration.
+SEAMLESS_VELORA_SWAP_FIXTURES_STRICT=0
+
+# Freeze ParaSwap /prices response for the AnyToken E2E (USDC -> ... -> LT)
+SEAMLESS_PARASWAP_RATE_FIXTURE_PATH=tests/fixtures/seamless-protocol/paraswap-rate-usdc-wsteth.json
+```
+
+### Testing enhancements (optional)
+
+#### Broadcast-to-VNet runner (optional)
+
+This repo’s Jest E2E tests intentionally simulate (no signing, no broadcasting).
+
+If you want an optional “broadcast to Tenderly VNet” runner for deeper debugging:
+
+- Start from the same tx-building path (LocalParaswapSDK + GenericSwapTransactionBuilder).
+- Use a funded private key on a Tenderly VNet fork.
+- Broadcast `eth_sendRawTransaction` to the VNet RPC endpoint and inspect receipts/traces.
+
+This is optional and not enabled by default because it is slower, requires key management + funding, and is less
+deterministic than Simulation API.
 
 ## Mapping Phases to Tests
 

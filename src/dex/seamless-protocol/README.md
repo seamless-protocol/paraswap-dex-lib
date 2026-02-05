@@ -11,24 +11,23 @@ manager accounting), and aggregators can integrate that mint/redeem path as a DE
 
 This folder (`src/dex/seamless-protocol/`) implements (or scaffolds) a **ParaSwap DexLib “DEX module”** for Seamless LTs.
 
-## Status (Phase 1 vs Outstanding)
+## Status (Implemented vs Outstanding)
 
-**Phase 1 (implemented)**
+**Implemented**
 
-- SELL-only collateral → LT pool discovery and pricing via `LeverageRouter.previewDeposit`.
-- Wrapper venue execution: `getDexParam` encodes `DexLeverageRouter.depositToRecipient(...)` with
-  `returnAmountPos = 0` and `insertFromAmountPos = 36`.
-- Internal debtAsset → collateral swapCalls built via Velora `/swap` (v6.2), with fixture support.
+- SELL + BUY pricing for collateral ↔ LT using `DexLeverageRouter` quote helpers.
+- Wrapper venue execution: `getDexParam` encodes `DexLeverageRouter.depositToRecipient(...)` and
+  `redeemToRecipient(...)` with `returnAmountPos = 0` and `insertFromAmountPos = 36`.
+- Internal swapCalls via Velora `/swap` (v6.2):
+  - debtAsset → collateral (SELL exact-in) for mint
+  - collateral → debtAsset (BUY exact-out) for redeem
 - Static market config, synthetic `getTopPoolsForToken`, integration + E2E tests.
 
-**Outstanding (Phase 2+)**
+**Outstanding**
 
-- BUY/exact-out pricing + tx build for mint and redeem.
-- SELL redeem leg (LT → collateral) with internal collateral → debt swapCalls.
-- Integrate `DexLeverageRouter` quote helpers (exact-in/out + flashLoan sizing) in pricing.
 - Replace the wrapper with a dedicated `LeverageDexRouter` (native receiver/refund + exact-in/out surfaces).
 - Optional Mode 2 (AnyToken → LT inside Seamless via `preCalls`/`postCalls`).
-- Deploy/config `DexLeverageRouter` on Base or disable Base markets until deployed.
+- Deploy/config `DexLeverageRouter` on Base (currently disabled in config).
 - Optional event-based pricing/state pool.
 - Upstream PR to `paraswap/paraswap-dex-lib` (see checklist below).
 
@@ -51,7 +50,7 @@ Velora (ParaSwap/Augustus) is an aggregator execution engine. The intended integ
 - Internally, leveraged mint/redeem still requires an **internal leverage swap** (`debtAsset ↔ collateral`) during the
   flashloan lifecycle, executed via Seamless periphery using `IMulticallExecutor.Call[]` (“swapCalls” / “leverageCalls”).
 
-Phase 1 implementation for the internal leverage swap route:
+Current implementation for the internal leverage swap route:
 
 - We use **Velora Market API v6.2 → tx calldata → wrap as `IMulticallExecutor.Call[]`** for the internal
   `debtAsset -> collateral` swap during the flashloan lifecycle.
@@ -65,19 +64,16 @@ Phase 1 implementation for the internal leverage swap route:
 
 ## Design
 
-Phase 1 scope is intentionally narrow and SELL/mint-first:
+Current scope supports both mint and redeem, SELL and BUY:
 
-- The module advertises pools only for **SELL collateral → LT** (mint-like leg).
+- Pools are advertised for **collateral ↔ LT** in both directions when enabled by config.
 - Pool identifier format (normative): `${dexKey}_${ltAddressLower}` (e.g. `SeamlessProtocol_0x...`).
-- BUY is intentionally unsupported in Phase 1 (pool discovery returns `[]`, pricing returns `null`).
-- Quoting uses Seamless protocol previews (Phase 1: `LeverageRouter.previewDeposit`) and carries the derived
-  `flashLoanAmount` forward into tx-building because `getDexParam` does not receive `blockNumber`.
-  - **Phase 1 flashloan sizing policy (current implementation):**
-    - `rawFlashLoanAmount = previewDeposit(...).debt`
-    - `flashLoanAmount = rawFlashLoanAmount * (1 - 5%)`
-    - Rationale: in multi-leg SELL routes the executor may patch the final leg `fromAmount` to the actual intermediate
-      balance after previous swaps; a small downward buffer reduces the risk of “borrow too much” failures.
-    - This policy is intentionally **fixed** in Phase 1 (documented only; not parameterized yet).
+- Quoting uses `DexLeverageRouter` view helpers (exact-in/out), which return both output amounts and the
+  `flashLoanAmount` needed to build internal swapCalls.
+  - For mint, DexLib uses the **buffered** `flashLoanAmount` for SELL and the **raw** `flashLoanAmount` for BUY
+    to avoid under-borrowing on exact-out routes.
+  - For redeem, DexLib conservatively **subtracts estimated collateral spent** to buy debt for repayment using a
+    Velora `/swap` quote (linear scaling from the last amount in the price grid).
 
 **Top pools behavior (`getTopPoolsForToken`)**
 
@@ -90,12 +86,12 @@ liquidity entries driven by static market config:
 - If `token` is an **LT token**, return the corresponding market (connector token is the collateral).
 - Otherwise, return `[]`.
 
-**Phase 1 execution surface (implemented):** ParaSwap venue legs call the recipient-aware wrapper
+**Execution surface (implemented):** ParaSwap venue legs call the recipient-aware wrapper
 `DexLeverageRouter.depositToRecipient(...)`, which forwards minted shares to the per-leg `recipient` and returns
 `sharesOut` as the first return value (`returnAmountPos=0`). `LeverageRouter.deposit(...)` alone is not a valid ParaSwap
 venue leg because it has no `receiver` and returns no output amount.
 
-## DexLeverageRouter (Phase 1 execution surface)
+## DexLeverageRouter (execution surface)
 
 This section documents the **minimum onchain surface** required for ParaSwap V6 “venue legs”.
 
@@ -127,7 +123,7 @@ All Solidity deliverables for this integration should be implemented in:
 This keeps execution surfaces out of `leverage-tokens` while still reusing its canonical protocol interfaces and
 periphery.
 
-### Minimal function surface (Phase 1: mint leg only)
+### Minimal function surface (mint + redeem)
 
 The minimal state-changing entrypoint needed to make **collateral -> LT** (mint) work as a ParaSwap venue leg:
 
@@ -145,6 +141,21 @@ function depositToRecipient(
 ) external returns (uint256 sharesOut);
 ```
 
+Redeem entrypoint used for **LT -> collateral**:
+
+```solidity
+function redeemToRecipient(
+    address leverageToken,
+    uint256 sharesIn,
+    uint256 minCollateralForSender,
+    address multicallExecutor,
+    IMulticallExecutor.Call[] calldata swapCalls,
+    address leverageRouter,
+    address receiver,
+    address refundRecipient
+) external returns (uint256 collateralOut);
+```
+
 Expected semantics:
 
 - Pull `collateralFromSender` from `msg.sender` (ParaSwap executor) into the wrapper.
@@ -152,7 +163,7 @@ Expected semantics:
   - Shares are minted to the wrapper.
   - The internal leverage `swapCalls` run inside the flashloan lifecycle via the configured `multicallExecutor`.
 - Transfer all minted shares to `receiver` (DexLib per-leg `recipient`).
-- Refund any dust to `refundRecipient` (Phase 1 uses `refundRecipient = receiver`).
+- Refund any dust to `refundRecipient` (current default uses `refundRecipient = receiver`).
 - Return `sharesOut` as the **first** return value (`returnAmountPos = 0`).
 
 Wrapper hardening (implemented in `seamless-intents/src/velora/DexLeverageRouter.sol`):
@@ -166,23 +177,25 @@ Wrapper hardening (implemented in `seamless-intents/src/velora/DexLeverageRouter
 
 **Internal leverage swap route (`swapCalls`)**
 
-Even though the venue leg is “collateral -> LT”, leveraged mint still requires an internal swap during the flashloan
-lifecycle (`debtAsset -> collateral`) executed by the Seamless `multicallExecutor`.
+Leveraged mint/redeem requires internal swaps during the flashloan lifecycle, executed by the Seamless
+`multicallExecutor`:
 
-Phase 1 direction is to build those `swapCalls` via **Velora Market API v6.2** (Option A):
+- Mint: `debtAsset -> collateral` (SELL exact-in, `amountIn = flashLoanAmount`)
+- Redeem: `collateral -> debtAsset` (BUY exact-out, `amountOut = flashLoanAmount`)
 
-- fetch swap tx calldata for `debtAsset -> collateral` (SELL exact-in, `amountIn = flashLoanAmount`)
+We build `swapCalls` via **Velora Market API v6.2**:
+
+- fetch swap tx calldata for the required direction
 - set `userAddress = multicallExecutor` and `receiver = multicallExecutor`
 - wrap into Seamless call list:
-  1. `approve(debtAsset, augustusV6.2, amountIn)`
+  1. `approve(srcToken, augustusV6.2, approvalAmount)`
   2. `{ target: augustusV6.2, value: tx.value, data: tx.data }`
 
-This introduces nested Augustus in Mode 1; Augustus may retain dust on itself (not sweepable). Phase 1 invariants
-should be treated as enforceable requirements (builder assertions + tests):
+This introduces nested Augustus in Mode 1; Augustus may retain dust on itself (not sweepable). Invariants to enforce:
 
 - `userAddress == receiver == multicallExecutor` (so `msg.sender` and custody model match)
 - `txParams.to` MUST be an allowlisted Augustus address for `(chainId, version)` (do not blindly trust API output)
-- `txParams.value == 0` (Phase 1 forbids internal swaps that require native ETH)
+- `txParams.value == 0` (native ETH swaps are not supported)
 - approval spender MUST equal `txParams.to`
 - Seamless custody addresses must end clean (tracked tokens == 0):
   - `multicallExecutor` (collateral + debtAsset)
@@ -192,12 +205,14 @@ should be treated as enforceable requirements (builder assertions + tests):
 
 Deep dive + experiments: `john-onboarding/design/dex-integration/InternalLeverageSwap.md`.
 
-### Phase 1 implementation status (done)
+### Implementation status (done)
 
 1. **Wrapper venue encoding is implemented**
-   - `SeamlessProtocol.getDexParam(...)` encodes `DexLeverageRouter.depositToRecipient(...)` and returns:
-     - `returnAmountPos = 0` (sharesOut as first return value)
-     - `insertFromAmountPos = 36` (patches `collateralFromSender` arg)
+   - `SeamlessProtocol.getDexParam(...)` encodes:
+     - `DexLeverageRouter.depositToRecipient(...)` for mint, and
+     - `DexLeverageRouter.redeemToRecipient(...)` for redeem
+   - `returnAmountPos = 0` (first return value)
+   - `insertFromAmountPos = 36` (patches the src amount arg)
    - code: `src/dex/seamless-protocol/seamless-protocol.ts`
 2. **ABI + config wiring exists**
    - ABI: `src/abi/seamless-protocol/DexLeverageRouter.json`
@@ -241,10 +256,10 @@ Deep dive + experiments: `john-onboarding/design/dex-integration/InternalLeverag
 Since `DexLeverageRouter` is mainnet-deployed, forks and generic Tenderly simulations can treat it as a normal onchain
 dependency (no bytecode injection required). VNets become a dev-only tool rather than a requirement.
 
-## Outstanding scope details (Phase 2+)
+## Outstanding scope details
 
-Phase 1 is intentionally SELL exact-in, mint-only. The remaining work is captured in the Outstanding list above and
-primarily covers BUY/exact-out support, redeem execution, and a native `LeverageDexRouter` surface.
+The remaining work is captured in the Outstanding list above and primarily covers a native `LeverageDexRouter`
+surface, optional Mode 2 routing, Base deployment, and event-based pricing.
 
 ## Getting Started
 
@@ -276,7 +291,7 @@ SEAMLESS_VELORA_SWAP_FIXTURES_STRICT=0
 # Do NOT enable this in CI.
 SEAMLESS_VELORA_SWAP_FIXTURES_WRITE=0
 
-# Optional: pin block number in E2E (keeps previewDeposit + fixture keys in sync).
+# Optional: pin block number in E2E (keeps quote helpers + fixture keys in sync).
 # MUST be >= 24387031 (DexLeverageRouter deployment block).
 SEAMLESS_E2E_PINNED_BLOCK_NUMBER=24387094
 
@@ -295,13 +310,13 @@ API_KEY_NATIVE=test
 
 Implementation notes:
 
-- `SeamlessProtocolEventPool` is intentionally disabled in Phase 1 (no event-driven caching).
+- `SeamlessProtocolEventPool` is intentionally disabled (no event-driven caching).
 - The E2E harness uses `TenderlySimulator.DEFAULT_OWNER` as the effective sender unless modified; ensure state overrides
   apply to that address when debugging.
 
 ## Testing
 
-This module follows the standard DexLib test structure (integration / events / e2e). In Phase 1:
+This module follows the standard DexLib test structure (integration / events / e2e). Currently:
 
 - Integration tests validate pool discovery, pricing, and `getTopPoolsForToken`.
 - EventPool tests are intentionally skipped (EventPool disabled).
@@ -316,7 +331,7 @@ RPC.
 There are two separate “execution surfaces” involved:
 
 1. **Onchain reads / quoting RPC**
-   - Used for ERC20 `decimals()`, `previewDeposit`, etc.
+   - Used for ERC20 `decimals()`, `DexLeverageRouter` quote helpers (which call preview functions), etc.
    - Comes from `HTTP_PROVIDER_1` (DexHelper private provider).
 2. **Tenderly Simulation API (REST)**
    - Used to “run” the transaction by simulating it against mainnet state at a pinned `block_number`, with
@@ -340,7 +355,7 @@ E2E determinism hinges on keeping `blockNumber` and frozen fixtures aligned:
   - `tests/fixtures/seamless-protocol/velora-swap.json` freezes Velora `/swap` txParams for the internal swapCalls
     (debtAsset -> collateral).
   - In CI, run with strict fixtures so tests never call live `/swap` (see env vars below).
-  - If you change the pinned block, `previewDeposit(...).debt` changes slightly → buffered `flashLoanAmount` changes
+  - If you change the pinned block, quote outputs (`previewDeposit` under the hood) change slightly → `flashLoanAmount` changes
     → you will need a new `/swap` fixture entry for the new key.
 - AnyToken E2E (USDC -> ... -> wstETH -> LT) also uses a frozen ParaSwap `/prices` fixture:
   - `tests/fixtures/seamless-protocol/paraswap-rate-usdc-wsteth.json`
@@ -370,7 +385,7 @@ yarn test src/dex/seamless-protocol/seamless-protocol-e2e.test.ts
 ### Required env vars (minimum for mainnet Simulation API E2E)
 
 ```bash
-# Onchain reads (previewDeposit, decimals, etc.)
+# Onchain reads (quote helpers, decimals, etc.)
 HTTP_PROVIDER_1=<mainnet RPC URL>
 
 # Tenderly Simulation API (REST)

@@ -46,8 +46,8 @@ describe('SeamlessProtocol E2E', () => {
 
     jest.setTimeout(120 * 1000);
 
-    // Phase 1 default: prefer Tenderly Simulation API (mainnet state) rather than VNet.
-    // VNet should be used only when you need VNet-only deployments/state.
+    // Default: prefer Tenderly Simulation API (mainnet state) rather than VNet.
+    // Use VNet only when you need VNet-only deployments/state.
     const useVNetForSimulation = process.env.SEAMLESS_E2E_USE_VNET === '1';
 
     const fixturesPath =
@@ -109,9 +109,16 @@ describe('SeamlessProtocol E2E', () => {
       srcSymbol: string,
       destSymbol: string,
       amount: bigint,
-      opts?: { pinBlockNumber?: number; strictVeloraFixtures?: boolean },
+      opts?: {
+        pinBlockNumber?: number;
+        strictVeloraFixtures?: boolean;
+        poolTokenSymbol?: string;
+      },
     ) {
-      const poolId = `${dexKey}_${tokens[destSymbol].address.toLowerCase()}`;
+      const poolTokenSymbol = opts?.poolTokenSymbol ?? destSymbol;
+      const poolId = `${dexKey}_${tokens[
+        poolTokenSymbol
+      ].address.toLowerCase()}`;
       const poolIdentifiers = { [dexKey]: [poolId] };
 
       // Force LocalParaswapSDK (no ParaSwap public API) and pin execution to the local SeamlessProtocol module.
@@ -179,7 +186,7 @@ describe('SeamlessProtocol E2E', () => {
         );
       }
 
-      // Keep minAmountOut permissive for Phase 1: we are validating wiring + recipient semantics, not quote accuracy
+      // Keep minAmountOut permissive: we are validating wiring + recipient semantics, not quote accuracy
       // vs internal swap slippage.
       const minMaxAmount = 1n;
 
@@ -255,13 +262,16 @@ describe('SeamlessProtocol E2E', () => {
       });
     });
 
-    it.skip('2. Check Swap LeverageToken to CollateralToken: WSTETH-ETH-25x to wstETH', async () => {
-      // Phase 1: redeem leg is not yet implemented. Once supported, this should build a SELL route
-      // LT -> collateral using the Seamless venue module and validate the per-leg `recipient` semantics.
+    it('2. Check Swap LeverageToken to CollateralToken: WSTETH-ETH-25x to wstETH', async () => {
+      await simulateE2E('WSTETH-ETH-25x', 'wstETH', 10n ** 18n, {
+        pinBlockNumber: pinnedBlockNumber,
+        strictVeloraFixtures: Boolean(process.env.CI),
+        poolTokenSymbol: 'WSTETH-ETH-25x',
+      });
     });
 
     it('3. Check Swap AnyToken to LeverageToken: USDC to WSTETH-ETH-25x', async () => {
-      // Phase 1 deterministic path:
+      // Deterministic path:
       // - USDC->wstETH leg is frozen via a ParaSwap /prices fixture (no live API call)
       // - internal leverage swap (/swap, debtAsset->collateral) is frozen via Velora /swap fixtures
       process.env.SEAMLESS_VELORA_SWAP_FIXTURES_PATH = fixturesPath;

@@ -9,7 +9,7 @@ import {
 
 const DEX_KEY = 'SeamlessProtocol';
 
-// Phase 1 Gate 1 venue target: DexLeverageRouter (recipient-aware wrapper around LeverageRouter.deposit).
+// Venue target: DexLeverageRouter (recipient-aware wrapper around LeverageRouter).
 const DEX_LEVERAGE_ROUTER = '0x03926d5E64aF50b575fDba4B490863dDf26bEd58';
 // const DEX_LEVERAGE_ROUTER = '0x0966646b319c450f4842ad352cb7b7a102fd145a'; // previous mainnet deployment
 
@@ -69,35 +69,45 @@ export const SeamlessProtocolConfig: DexConfigMap<DexParams> = {
           seamlessPeriphery: MAINNET_SEAMLESS_PERIPHERY,
           seamlessLeverageToken: MAINNET_SEAMLESS_sUSDS_USDT_25x,
           enableSellMint: true,
-          enableSellRedeem: false,
+          enableSellRedeem: true,
+          enableBuyMint: true,
+          enableBuyRedeem: true,
         },
         [MAINNET_SEAMLESS_SIUSD_USDC_11x.leverageToken.toLowerCase()]: {
           seamlessCore: MAINNET_SEAMLESS_CORE,
           seamlessPeriphery: MAINNET_SEAMLESS_PERIPHERY,
           seamlessLeverageToken: MAINNET_SEAMLESS_SIUSD_USDC_11x,
           enableSellMint: true,
-          enableSellRedeem: false,
+          enableSellRedeem: true,
+          enableBuyMint: true,
+          enableBuyRedeem: true,
         },
         [MAINNET_SEAMLESS_RLP_USDC_6_75x.leverageToken.toLowerCase()]: {
           seamlessCore: MAINNET_SEAMLESS_CORE,
           seamlessPeriphery: MAINNET_SEAMLESS_PERIPHERY,
           seamlessLeverageToken: MAINNET_SEAMLESS_RLP_USDC_6_75x,
           enableSellMint: true,
-          enableSellRedeem: false,
+          enableSellRedeem: true,
+          enableBuyMint: true,
+          enableBuyRedeem: true,
         },
         [MAINNET_SEAMLESS_WSTETH_ETH_25x.leverageToken.toLowerCase()]: {
           seamlessCore: MAINNET_SEAMLESS_CORE,
           seamlessPeriphery: MAINNET_SEAMLESS_PERIPHERY,
           seamlessLeverageToken: MAINNET_SEAMLESS_WSTETH_ETH_25x,
           enableSellMint: true,
-          enableSellRedeem: false,
+          enableSellRedeem: true,
+          enableBuyMint: true,
+          enableBuyRedeem: true,
         },
         [MAINNET_SEAMLESS_WSTETH_WETH_2x_COW.leverageToken.toLowerCase()]: {
           seamlessCore: MAINNET_SEAMLESS_CORE,
           seamlessPeriphery: MAINNET_SEAMLESS_PERIPHERY,
           seamlessLeverageToken: MAINNET_SEAMLESS_WSTETH_WETH_2x_COW,
           enableSellMint: true,
-          enableSellRedeem: false,
+          enableSellRedeem: true,
+          enableBuyMint: true,
+          enableBuyRedeem: true,
         },
       },
     },
@@ -107,8 +117,10 @@ export const SeamlessProtocolConfig: DexConfigMap<DexParams> = {
           seamlessCore: BASE_SEAMLESS_CORE,
           seamlessPeriphery: BASE_SEAMLESS_PERIPHERY,
           seamlessLeverageToken: BASE_SEAMLESS_WEETH_WETH_17x,
-          enableSellMint: true,
+          enableSellMint: false,
           enableSellRedeem: false,
+          enableBuyMint: false,
+          enableBuyRedeem: false,
         },
       },
     },

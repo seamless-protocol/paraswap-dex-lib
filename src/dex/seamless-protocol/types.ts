@@ -1,6 +1,6 @@
 import { Address } from '../../types';
 
-// Phase 1: EventPool is intentionally not used.
+// EventPool is intentionally not used (static-config driven markets).
 export type PoolState = Record<string, never>;
 
 // Minimal “data” carried from pricing -> tx building.
@@ -9,8 +9,10 @@ export type PoolState = Record<string, never>;
 // is block-pinned) into this struct.
 export type SeamlessProtocolData = {
   leverageToken: Address;
-  // The src amount this data was priced for (Phase 1: the full/chunked amount used for tx building).
+  // The src amount this data was priced for (used for tx building).
   amountIn: bigint;
+  // Expected output amount at pricing time (used for approval sizing fallback in tx building).
+  amountOut: bigint;
   // Previewed debt (debtToken units) at the pricing block.
   // MUST correspond to amountIn (see doc: validate BigInt(srcAmount) == amountIn).
   flashLoanAmount: bigint;
@@ -39,9 +41,11 @@ export type SeamlessMarketConfig = {
   seamlessPeriphery: SeamlessPeriphery;
   seamlessLeverageToken: SeamlessLeverageToken;
 
-  // Feature flags let us keep Phase 1 intentionally narrow.
+  // Feature flags control per-market side enablement.
   enableSellMint: boolean;
   enableSellRedeem?: boolean;
+  enableBuyMint?: boolean;
+  enableBuyRedeem?: boolean;
 };
 
 export type DexParams = {

@@ -77,6 +77,77 @@
   },
   {
     "type": "function",
+    "name": "redeemToRecipient",
+    "inputs": [
+      {
+        "name": "leverageToken",
+        "type": "address",
+        "internalType": "contract ILeverageToken"
+      },
+      {
+        "name": "sharesIn",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "minCollateralForSender",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "multicallExecutor",
+        "type": "address",
+        "internalType": "contract IMulticallExecutor"
+      },
+      {
+        "name": "swapCalls",
+        "type": "tuple[]",
+        "internalType": "struct IMulticallExecutor.Call[]",
+        "components": [
+          {
+            "name": "target",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "value",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "data",
+            "type": "bytes",
+            "internalType": "bytes"
+          }
+        ]
+      },
+      {
+        "name": "leverageRouter",
+        "type": "address",
+        "internalType": "contract ILeverageRouter"
+      },
+      {
+        "name": "receiver",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "refundRecipient",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "collateralOut",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "quoteMintFromCollateralExactIn",
     "inputs": [
       {

@@ -9,7 +9,6 @@ import {
   ExchangePrices,
   PoolPrices,
   AdapterExchangeParam,
-  SimpleExchangeParam,
   PoolLiquidity,
   Logger,
   NumberAsString,
@@ -24,18 +23,11 @@ import { SeamlessProtocolData, DexParams } from './types';
 import { SimpleExchange } from '../simple-exchange';
 import { SeamlessProtocolConfig } from './config';
 import { SeamlessProtocolEventPool } from './seamless-protocol-pool';
-import LEVERAGE_ROUTER_ABI from '../../abi/seamless-protocol/LeverageRouter.json';
 import DEX_LEVERAGE_ROUTER_ABI from '../../abi/seamless-protocol/DexLeverageRouter.json';
 import { uint8ToNumber } from '../../lib/decoders';
 
-const LEVERAGE_ROUTER_IFACE = new Interface(LEVERAGE_ROUTER_ABI);
 const DEX_LEVERAGE_ROUTER_IFACE = new Interface(DEX_LEVERAGE_ROUTER_ABI);
 const GAS_COST_PREVIEW_DEPOSIT = 75_000;
-// Phase 1 pragmatic guardrail:
-// In multi-leg SELL routes, the executor may patch the final leg's `fromAmount` to the actual balance after previous
-// swaps. Since we precompute `flashLoanAmount` offchain (from previewDeposit), a small downward buffer reduces the risk
-// of "borrowed too much debt" leading to Morpho repayment failures when the actual collateral input is slightly lower.
-const FLASHLOAN_AMOUNT_BUFFER_BPS = 500n; // 5%
 const VELORE_VERSION = '6.2';
 const DEFAULT_VELORA_API_URL = 'https://api.paraswap.io';
 const INTERNAL_SWAP_SLIPPAGE_BPS = '100'; // 1%
@@ -48,6 +40,7 @@ type VeloraSwapTxParams = {
   to: Address;
   data: string;
   value?: NumberAsString;
+  srcAmount?: NumberAsString;
 };
 
 export class SeamlessProtocol
@@ -77,6 +70,7 @@ export class SeamlessProtocol
     string,
     [Address, NumberAsString, string][]
   >();
+  private readonly veloraSwapQuoteCache = new Map<string, bigint>();
 
   constructor(
     readonly network: Network,
@@ -153,19 +147,29 @@ export class SeamlessProtocol
     side: SwapSide,
     blockNumber: number,
   ): Promise<string[]> {
-    // Phase 1: SELL mint leg only (collateral -> LT).
-    if (side !== SwapSide.SELL) return [];
+    const src = srcToken.address.toLowerCase();
+    const dest = destToken.address.toLowerCase();
 
-    const ltKey = destToken.address.toLowerCase();
-    const market = this.config.marketsByLeverageToken[ltKey];
-    if (!market || !market.enableSellMint) return [];
+    const market =
+      this.config.marketsByLeverageToken[dest] ??
+      this.config.marketsByLeverageToken[src];
+    if (!market) return [];
 
+    if (!this.hasRequiredPeriphery(market)) return [];
+
+    const lt = market.seamlessLeverageToken.leverageToken.toLowerCase();
     const collateral =
       market.seamlessLeverageToken.collateralToken.toLowerCase();
-    if (srcToken.address.toLowerCase() !== collateral) return [];
+
+    const isMint = src === collateral && dest === lt;
+    const isRedeem = src === lt && dest === collateral;
+    if (!isMint && !isRedeem) return [];
+
+    if (isMint && !this.isMintEnabled(market, side)) return [];
+    if (isRedeem && !this.isRedeemEnabled(market, side)) return [];
 
     // NOTE: blockNumber is unused for pool discovery (static config).
-    return [`${this.dexKey}_${ltKey}`];
+    return [`${this.dexKey}_${lt}`];
   }
 
   // Returns pool prices for amounts.
@@ -180,87 +184,181 @@ export class SeamlessProtocol
     blockNumber: number,
     limitPools?: string[],
   ): Promise<null | ExchangePrices<SeamlessProtocolData>> {
-    // Phase 1: SELL mint leg only (collateral -> LT).
-    if (side !== SwapSide.SELL) return null;
+    const src = srcToken.address.toLowerCase();
+    const dest = destToken.address.toLowerCase();
 
-    const ltKey = destToken.address.toLowerCase();
-    const market = this.config.marketsByLeverageToken[ltKey];
-    if (!market || !market.enableSellMint) return null;
+    const market =
+      this.config.marketsByLeverageToken[dest] ??
+      this.config.marketsByLeverageToken[src];
+    if (!market) return null;
 
+    const leverageToken = market.seamlessLeverageToken.leverageToken;
+    const lt = leverageToken.toLowerCase();
     const collateral =
       market.seamlessLeverageToken.collateralToken.toLowerCase();
-    if (srcToken.address.toLowerCase() !== collateral) return null;
 
-    const poolId = `${this.dexKey}_${ltKey}`;
+    const isMint = src === collateral && dest === lt;
+    const isRedeem = src === lt && dest === collateral;
+    if (!isMint && !isRedeem) return null;
+
+    if (isMint && !this.isMintEnabled(market, side)) return null;
+    if (isRedeem && !this.isRedeemEnabled(market, side)) return null;
+    if (!this.hasRequiredPeriphery(market)) return null;
+
+    const poolId = `${this.dexKey}_${lt}`;
     if (limitPools && !limitPools.includes(poolId)) return null;
 
     const leverageRouter = market.seamlessPeriphery.leverageRouter;
-    if (!leverageRouter) {
+    const dexLeverageRouter = market.seamlessPeriphery.dexLeverageRouter;
+    if (!leverageRouter || !dexLeverageRouter) {
       this.logger.warn(
-        `${this.dexKey}-${this.network}: leverageRouter missing in config for lt=${market.seamlessLeverageToken.leverageToken}`,
+        `${this.dexKey}-${
+          this.network
+        }: periphery missing for lt=${leverageToken} (leverageRouter=${
+          leverageRouter ?? 'missing'
+        }, dexLeverageRouter=${dexLeverageRouter ?? 'missing'})`,
       );
       return null;
     }
 
-    const leverageToken = market.seamlessLeverageToken.leverageToken;
-
     const prices: bigint[] = new Array(amounts.length);
-    let lastDebt: bigint | null = null;
+    const flashLoans: bigint[] = new Array(amounts.length).fill(0n);
+    let lastFlashLoan: bigint | null = null;
 
-    // Build multicall params for non-zero amounts.
-    const calls = amounts
-      .map((amount, idx) => ({ amount, idx }))
-      .filter(x => x.amount !== 0n)
-      .map(({ amount, idx }) => ({
-        target: leverageRouter,
-        callData: LEVERAGE_ROUTER_IFACE.encodeFunctionData('previewDeposit', [
-          leverageToken,
-          amount.toString(),
-        ]),
-        decodeFunction: (returnData: any) => {
-          const decoded = LEVERAGE_ROUTER_IFACE.decodeFunctionResult(
-            'previewDeposit',
-            returnData,
-          );
-          const preview = decoded[0];
-          return {
-            shares: BigInt(preview.shares.toString()),
-            debt: BigInt(preview.debt.toString()),
-          };
-        },
-        cb: (decoded: { shares: bigint; debt: bigint }) => {
-          prices[idx] = decoded.shares;
-          if (idx === amounts.length - 1) lastDebt = decoded.debt;
-        },
-      }));
+    const lastIdx = amounts.length - 1;
+    const lastAmount = amounts[lastIdx] ?? 0n;
 
     // Fill zeros upfront (including the conventional first 0 amount).
     for (let i = 0; i < amounts.length; i++) {
       if (amounts[i] === 0n) prices[i] = 0n;
     }
 
-    // Execute in one multicall batch (may internally chunk).
-    await this.dexHelper.multiWrapper.tryAggregate(true, calls, blockNumber);
+    const useRawFlashLoan = isMint && side === SwapSide.BUY;
 
-    // Phase 1 shortcut: we only carry tx-building data for the last amount.
-    const amountIn = amounts[amounts.length - 1] ?? 0n;
-    if (amountIn !== 0n && lastDebt === null) {
+    const calls = amounts
+      .map((amount, idx) => ({ amount, idx }))
+      .filter(x => x.amount !== 0n)
+      .map(({ amount, idx }) => {
+        let fnName:
+          | 'quoteMintFromCollateralExactIn'
+          | 'quoteMintFromCollateralExactOut'
+          | 'quoteRedeemToCollateralExactIn'
+          | 'quoteRedeemToCollateralExactOut';
+
+        if (isMint) {
+          fnName =
+            side === SwapSide.SELL
+              ? 'quoteMintFromCollateralExactIn'
+              : 'quoteMintFromCollateralExactOut';
+        } else {
+          fnName =
+            side === SwapSide.SELL
+              ? 'quoteRedeemToCollateralExactIn'
+              : 'quoteRedeemToCollateralExactOut';
+        }
+
+        return {
+          target: dexLeverageRouter,
+          callData: DEX_LEVERAGE_ROUTER_IFACE.encodeFunctionData(fnName, [
+            leverageToken,
+            amount.toString(),
+            leverageRouter,
+          ]),
+          decodeFunction: (returnData: any) => {
+            const decoded = DEX_LEVERAGE_ROUTER_IFACE.decodeFunctionResult(
+              fnName,
+              returnData,
+            );
+            if (
+              fnName === 'quoteMintFromCollateralExactIn' ||
+              fnName === 'quoteMintFromCollateralExactOut'
+            ) {
+              const rawFlash = BigInt(decoded[2].toString());
+              const bufferedFlash = BigInt(decoded[3].toString());
+              return {
+                price: BigInt(decoded[0].toString()),
+                // For BUY, use the raw flashLoanAmount to avoid under-borrowing.
+                flashLoanAmount: useRawFlashLoan ? rawFlash : bufferedFlash,
+              };
+            }
+            if (fnName === 'quoteRedeemToCollateralExactIn') {
+              return {
+                price: BigInt(decoded[0].toString()),
+                flashLoanAmount: BigInt(decoded[2].toString()),
+              };
+            }
+            return {
+              price: BigInt(decoded[0].toString()),
+              flashLoanAmount: BigInt(decoded[2].toString()),
+            };
+          },
+          cb: (decoded: { price: bigint; flashLoanAmount: bigint }) => {
+            prices[idx] = decoded.price;
+            flashLoans[idx] = decoded.flashLoanAmount;
+            if (idx === lastIdx) lastFlashLoan = decoded.flashLoanAmount;
+          },
+        };
+      });
+
+    if (calls.length > 0) {
+      await this.dexHelper.multiWrapper.tryAggregate(true, calls, blockNumber);
+    }
+
+    if (lastAmount !== 0n && lastFlashLoan === null) {
       throw new Error(
         `${this.dexKey}-${this.network}: failed to compute flashLoanAmount for lt=${leverageToken}`,
       );
     }
 
-    const rawFlashLoanAmount = lastDebt ?? 0n;
-    const flashLoanAmount =
-      rawFlashLoanAmount === 0n
-        ? 0n
-        : (rawFlashLoanAmount * (10_000n - FLASHLOAN_AMOUNT_BUFFER_BPS)) /
-          10_000n;
+    // Redeem flows must account for collateral spent to buy debt for flashloan repayment.
+    // Use a single Velora /swap quote for the last amount and scale linearly for other points.
+    if (isRedeem && lastFlashLoan && lastFlashLoan > 0n) {
+      const swapCostLast = await this.getVeloraSwapSourceAmount({
+        side: SwapSide.BUY,
+        srcToken: market.seamlessLeverageToken.collateralToken,
+        destToken: market.seamlessLeverageToken.debtToken,
+        multicallExecutor: market.seamlessPeriphery.multicallExecutor,
+        amount: lastFlashLoan,
+      });
+
+      if (swapCostLast && swapCostLast > 0n) {
+        for (let i = 0; i < amounts.length; i++) {
+          if (amounts[i] === 0n) continue;
+          const flashLoanAmount = flashLoans[i] ?? 0n;
+          if (flashLoanAmount === 0n) continue;
+
+          const estimatedCost =
+            (flashLoanAmount * swapCostLast) / lastFlashLoan;
+
+          if (side === SwapSide.SELL) {
+            prices[i] =
+              prices[i] > estimatedCost ? prices[i] - estimatedCost : 0n;
+          } else {
+            const desiredOut = amounts[i];
+            const grossOut = desiredOut + estimatedCost;
+            // Conservatively scale sharesIn requirement by the gross/desired ratio.
+            prices[i] = (prices[i] * grossOut + desiredOut - 1n) / desiredOut;
+            flashLoans[i] =
+              (flashLoanAmount * grossOut + desiredOut - 1n) / desiredOut;
+          }
+        }
+
+        if (side === SwapSide.BUY) {
+          lastFlashLoan = flashLoans[lastIdx] ?? lastFlashLoan;
+        }
+      }
+    }
+
+    const amountIn =
+      side === SwapSide.SELL ? lastAmount : prices[lastIdx] ?? 0n;
+    const amountOut =
+      side === SwapSide.SELL ? prices[lastIdx] ?? 0n : lastAmount;
 
     const data: SeamlessProtocolData = {
       leverageToken,
       amountIn,
-      flashLoanAmount,
+      amountOut,
+      flashLoanAmount: lastFlashLoan ?? 0n,
     };
 
     return [
@@ -305,39 +403,46 @@ export class SeamlessProtocol
     srcToken: Address,
     destToken: Address,
     srcAmount: NumberAsString,
-    _destAmount: NumberAsString,
-    _recipient: Address,
+    destAmount: NumberAsString,
+    recipient: Address,
     data: SeamlessProtocolData,
     side: SwapSide,
   ): Promise<DexExchangeParam> {
-    if (side !== SwapSide.SELL) {
-      throw new Error(`${this.dexKey} Phase 1 supports SELL only`);
-    }
-
     const ltKey = data.leverageToken.toLowerCase();
     const market = this.config.marketsByLeverageToken[ltKey];
     if (!market) {
       throw new Error(`${this.dexKey} unknown market lt=${data.leverageToken}`);
     }
-    if (!market.enableSellMint) {
-      throw new Error(
-        `${this.dexKey} SELL mint is disabled for lt=${data.leverageToken}`,
-      );
-    }
 
     const collateralToken = market.seamlessLeverageToken.collateralToken;
     const leverageToken = market.seamlessLeverageToken.leverageToken;
+    const debtToken = market.seamlessLeverageToken.debtToken;
 
-    if (
-      srcToken.toLowerCase() !== collateralToken.toLowerCase() ||
-      destToken.toLowerCase() !== leverageToken.toLowerCase()
-    ) {
+    const src = srcToken.toLowerCase();
+    const dest = destToken.toLowerCase();
+    const isMint =
+      src === collateralToken.toLowerCase() &&
+      dest === leverageToken.toLowerCase();
+    const isRedeem =
+      src === leverageToken.toLowerCase() &&
+      dest === collateralToken.toLowerCase();
+    if (!isMint && !isRedeem) {
       throw new Error(
-        `${this.dexKey} Phase 1 supports only collateral->LT SELL (src=${srcToken}, dest=${destToken})`,
+        `${this.dexKey} unsupported pair (src=${srcToken}, dest=${destToken})`,
+      );
+    }
+    if (isMint && !this.isMintEnabled(market, side)) {
+      throw new Error(
+        `${this.dexKey} mint is disabled for lt=${data.leverageToken} side=${side}`,
+      );
+    }
+    if (isRedeem && !this.isRedeemEnabled(market, side)) {
+      throw new Error(
+        `${this.dexKey} redeem is disabled for lt=${data.leverageToken} side=${side}`,
       );
     }
 
-    // Phase 1: pricing carries only one flashLoanAmount (for a specific src amount).
+    // Pricing carries only one flashLoanAmount (for a specific src amount).
     // getDexParam has no blockNumber, so we fail fast if tx-building tries to use a different srcAmount.
     if (BigInt(srcAmount) !== data.amountIn) {
       throw new Error(
@@ -350,47 +455,88 @@ export class SeamlessProtocol
     const leverageRouter = market.seamlessPeriphery.leverageRouter;
     if (!leverageRouter) {
       throw new Error(
-        `${this.dexKey} missing leverageRouter (Gate 0) for lt=${data.leverageToken}`,
+        `${this.dexKey} missing leverageRouter for lt=${data.leverageToken}`,
       );
     }
 
     const dexLeverageRouter = market.seamlessPeriphery.dexLeverageRouter;
     if (!dexLeverageRouter) {
       throw new Error(
-        `${this.dexKey} missing dexLeverageRouter (Gate 1) for lt=${data.leverageToken}`,
+        `${this.dexKey} missing dexLeverageRouter for lt=${data.leverageToken}`,
       );
     }
 
-    // Gate 1: execute against a thin wrapper that:
-    // - pulls collateral from the ParaSwap executor (`msg.sender`)
-    // - calls LeverageRouter.deposit(...) as itself (so shares are minted to the wrapper)
-    // - forwards minted shares to the per-leg `recipient`
-    // - returns `sharesOut` as the first return value (returnAmountPos=0)
-    //
-    // Internal swapCalls (debtAsset -> collateral) are executed by the Seamless multicallExecutor during the flashloan
-    // lifecycle. Phase 1: build swapCalls via Velora Market API v6.2 and wrap the returned tx calldata as an
-    // IMulticallExecutor.Call[] (nested Augustus).
-    const debtToken = market.seamlessLeverageToken.debtToken;
-    const swapCalls = await this.buildDebtToCollateralSwapCalls({
-      debtToken,
-      collateralToken,
+    if (!market.seamlessPeriphery.multicallExecutor) {
+      throw new Error(
+        `${this.dexKey} missing multicallExecutor for lt=${data.leverageToken}`,
+      );
+    }
+
+    if (isMint) {
+      // Internal swapCalls (debtAsset -> collateral) executed by multicallExecutor.
+      const swapCalls = await this.buildVeloraSwapCalls({
+        srcToken: debtToken,
+        destToken: collateralToken,
+        multicallExecutor: market.seamlessPeriphery.multicallExecutor,
+        amount: data.flashLoanAmount,
+        side: SwapSide.SELL,
+        approvalAmount: data.flashLoanAmount,
+      });
+
+      const minShares = side === SwapSide.SELL ? '1' : destAmount;
+
+      const exchangeData = DEX_LEVERAGE_ROUTER_IFACE.encodeFunctionData(
+        'depositToRecipient',
+        [
+          leverageToken,
+          srcAmount,
+          data.flashLoanAmount.toString(),
+          minShares,
+          market.seamlessPeriphery.multicallExecutor,
+          swapCalls,
+          leverageRouter,
+          recipient,
+          recipient,
+        ],
+      );
+
+      return {
+        needWrapNative: this.needWrapNative,
+        dexFuncHasRecipient: true,
+        targetExchange: dexLeverageRouter,
+        exchangeData,
+        // depositToRecipient(leverageToken, collateralFromSender, ...) => argIndex( collateralFromSender ) == 1 => 4 + 32*1 == 36
+        // Avoid accidental matches inside nested dynamic bytes (swapCalls) by forcing the patch location.
+        insertFromAmountPos: 36,
+        // sharesOut is returned as the first return value for SELL
+        returnAmountPos: side === SwapSide.SELL ? 0 : undefined,
+      };
+    }
+
+    // Redeem: swap collateral -> debt to repay flash loan (BUY exact-out).
+    const approvalAmount = data.amountOut;
+    const swapCalls = await this.buildVeloraSwapCalls({
+      srcToken: collateralToken,
+      destToken: debtToken,
       multicallExecutor: market.seamlessPeriphery.multicallExecutor,
-      flashLoanAmount: data.flashLoanAmount,
+      amount: data.flashLoanAmount,
+      side: SwapSide.BUY,
+      approvalAmount,
     });
 
+    const minCollateral = side === SwapSide.SELL ? '1' : destAmount;
+
     const exchangeData = DEX_LEVERAGE_ROUTER_IFACE.encodeFunctionData(
-      'depositToRecipient',
+      'redeemToRecipient',
       [
         leverageToken,
         srcAmount,
-        data.flashLoanAmount.toString(),
-        // ParaSwap sets per-leg destAmount=1 for SELL; keep router minShares minimal and let Augustus enforce global slippage.
-        '1',
+        minCollateral,
         market.seamlessPeriphery.multicallExecutor,
         swapCalls,
         leverageRouter,
-        _recipient,
-        _recipient,
+        recipient,
+        recipient,
       ],
     );
 
@@ -399,11 +545,10 @@ export class SeamlessProtocol
       dexFuncHasRecipient: true,
       targetExchange: dexLeverageRouter,
       exchangeData,
-      // depositToRecipient(leverageToken, collateralFromSender, ...) => argIndex( collateralFromSender ) == 1 => 4 + 32*1 == 36
-      // Avoid accidental matches inside nested dynamic bytes (swapCalls) by forcing the patch location.
+      // redeemToRecipient(leverageToken, sharesIn, ...) => argIndex( sharesIn ) == 1 => 4 + 32*1 == 36
       insertFromAmountPos: 36,
-      // sharesOut is returned as the first return value
-      returnAmountPos: 0,
+      // collateralOut is returned as the first return value for SELL
+      returnAmountPos: side === SwapSide.SELL ? 0 : undefined,
     };
   }
 
@@ -424,18 +569,21 @@ export class SeamlessProtocol
     return decimals;
   }
 
-  private async buildDebtToCollateralSwapCalls(params: {
-    debtToken: Address;
-    collateralToken: Address;
+  private async buildVeloraSwapCalls(params: {
+    srcToken: Address;
+    destToken: Address;
     multicallExecutor: Address;
-    flashLoanAmount: bigint;
+    amount: bigint;
+    side: SwapSide;
+    approvalAmount: bigint;
   }): Promise<[Address, NumberAsString, string][]> {
-    if (params.flashLoanAmount === 0n) return [];
+    if (params.amount === 0n) return [];
 
     const fixtureKey = this.buildVeloraSwapFixtureKey({
-      srcToken: params.debtToken,
-      destToken: params.collateralToken,
-      amount: params.flashLoanAmount,
+      side: params.side,
+      srcToken: params.srcToken,
+      destToken: params.destToken,
+      amount: params.amount,
       userAddress: params.multicallExecutor,
       receiver: params.multicallExecutor,
       slippageBps: INTERNAL_SWAP_SLIPPAGE_BPS,
@@ -458,10 +606,11 @@ export class SeamlessProtocol
         );
       }
       txParams = await this.fetchVeloraSwapTxParams({
-        debtToken: params.debtToken,
-        collateralToken: params.collateralToken,
+        srcToken: params.srcToken,
+        destToken: params.destToken,
         multicallExecutor: params.multicallExecutor,
-        flashLoanAmount: params.flashLoanAmount,
+        amount: params.amount,
+        side: params.side,
       });
       if (this.veloraSwapFixturesWrite && this.veloraSwapFixturesPath) {
         this.persistVeloraSwapFixture(fixtureKey, txParams);
@@ -486,7 +635,7 @@ export class SeamlessProtocol
       throw new Error(
         `${
           this.dexKey
-        } Phase 1 forbids internal swaps with value>0 (value=${value.toString()})`,
+        } internal swaps with value>0 are not supported (value=${value.toString()})`,
       );
     }
 
@@ -496,14 +645,21 @@ export class SeamlessProtocol
       to,
       '0',
     ]);
+    const approvalAmountFromTx =
+      txParams.srcAmount !== undefined
+        ? BigInt(txParams.srcAmount.toString())
+        : null;
+    const approvalAmount =
+      approvalAmountFromTx ??
+      (params.approvalAmount === 0n ? params.amount : params.approvalAmount);
     const approveAmount = this.erc20Interface.encodeFunctionData('approve', [
       to,
-      params.flashLoanAmount.toString(),
+      approvalAmount.toString(),
     ]);
 
     const calls: [Address, NumberAsString, string][] = [
-      [params.debtToken, '0', approveZero],
-      [params.debtToken, '0', approveAmount],
+      [params.srcToken, '0', approveZero],
+      [params.srcToken, '0', approveAmount],
       [to, '0', String(txParams.data)],
     ];
     this.veloraSwapCallsCache.set(fixtureKey, calls);
@@ -516,7 +672,61 @@ export class SeamlessProtocol
     return calls;
   }
 
+  private async getVeloraSwapSourceAmount(params: {
+    srcToken: Address;
+    destToken: Address;
+    multicallExecutor: Address;
+    amount: bigint;
+    side: SwapSide;
+  }): Promise<bigint | null> {
+    if (params.amount === 0n) return 0n;
+
+    const fixtureKey = this.buildVeloraSwapFixtureKey({
+      side: params.side,
+      srcToken: params.srcToken,
+      destToken: params.destToken,
+      amount: params.amount,
+      userAddress: params.multicallExecutor,
+      receiver: params.multicallExecutor,
+      slippageBps: INTERNAL_SWAP_SLIPPAGE_BPS,
+      excludeDEXS: INTERNAL_SWAP_EXCLUDE_DEXS,
+    });
+    const cached = this.veloraSwapQuoteCache.get(fixtureKey);
+    if (cached) return cached;
+
+    let txParams = this.veloraSwapFixtures?.get(fixtureKey);
+    if (!txParams) {
+      if (this.veloraSwapFixtures && this.veloraSwapFixturesStrict) {
+        throw new Error(
+          `${this.dexKey} missing Velora /swap fixture for key=${fixtureKey}`,
+        );
+      }
+      txParams = await this.fetchVeloraSwapTxParams({
+        srcToken: params.srcToken,
+        destToken: params.destToken,
+        multicallExecutor: params.multicallExecutor,
+        amount: params.amount,
+        side: params.side,
+      });
+      if (this.veloraSwapFixturesWrite && this.veloraSwapFixturesPath) {
+        this.persistVeloraSwapFixture(fixtureKey, txParams);
+      }
+    }
+
+    if (!txParams?.srcAmount) {
+      this.logger.warn(
+        `${this.dexKey}-${this.network}: Velora /swap missing srcAmount for key=${fixtureKey}; redeem pricing will not be adjusted`,
+      );
+      return null;
+    }
+
+    const sourceAmount = BigInt(txParams.srcAmount.toString());
+    this.veloraSwapQuoteCache.set(fixtureKey, sourceAmount);
+    return sourceAmount;
+  }
+
   private buildVeloraSwapFixtureKey(params: {
+    side: SwapSide;
     srcToken: Address;
     destToken: Address;
     amount: bigint;
@@ -528,7 +738,7 @@ export class SeamlessProtocol
     return [
       this.network.toString(),
       VELORE_VERSION,
-      SwapSide.SELL,
+      params.side,
       params.srcToken.toLowerCase(),
       params.destToken.toLowerCase(),
       params.amount.toString(),
@@ -564,7 +774,7 @@ export class SeamlessProtocol
 
     json.meta = json.meta ?? {
       notes:
-        'Velora /swap fixtures used to build SeamlessProtocol internal leverage swapCalls (debtAsset -> collateral) deterministically in E2E.',
+        'Velora /swap fixtures used to build SeamlessProtocol internal leverage swapCalls deterministically in E2E.',
       keyFormat:
         'network:version:side:srcToken:destToken:amount:userAddress:receiver:slippageBps:excludeDEXS',
     };
@@ -605,6 +815,7 @@ export class SeamlessProtocol
       const to = maybeTx?.to;
       const data = maybeTx?.data;
       const value = maybeTx?.value;
+      const srcAmount = maybeTx?.srcAmount;
       if (!to || !data) {
         throw new Error(
           `${this.dexKey}-${this.network}: invalid fixture for key=${key} (missing txParams.to/data)`,
@@ -614,6 +825,7 @@ export class SeamlessProtocol
         to: String(to),
         data: String(data),
         value: value !== undefined ? String(value) : undefined,
+        srcAmount: srcAmount !== undefined ? String(srcAmount) : undefined,
       });
     }
 
@@ -621,30 +833,31 @@ export class SeamlessProtocol
   }
 
   private async fetchVeloraSwapTxParams(params: {
-    debtToken: Address;
-    collateralToken: Address;
+    srcToken: Address;
+    destToken: Address;
     multicallExecutor: Address;
-    flashLoanAmount: bigint;
+    amount: bigint;
+    side: SwapSide;
   }): Promise<VeloraSwapTxParams> {
-    const srcDecimals = await this.getTokenDecimals(params.debtToken);
-    const destDecimals = await this.getTokenDecimals(params.collateralToken);
+    const srcDecimals = await this.getTokenDecimals(params.srcToken);
+    const destDecimals = await this.getTokenDecimals(params.destToken);
 
-    // Phase 1: use Velora Market API v6.2 /swap endpoint to build a debtAsset->collateral internal route.
+    // Use Velora Market API v6.2 /swap endpoint to build the internal route.
     // IMPORTANT: userAddress == receiver == multicallExecutor, because swap targets see msg.sender == multicallExecutor.
     const { data } = await axios.get(`${this.veloraApiUrl}/swap`, {
       params: {
         network: this.network.toString(),
         version: VELORE_VERSION,
-        side: SwapSide.SELL,
-        srcToken: params.debtToken,
+        side: params.side,
+        srcToken: params.srcToken,
         srcDecimals,
-        destToken: params.collateralToken,
+        destToken: params.destToken,
         destDecimals,
-        amount: params.flashLoanAmount.toString(),
+        amount: params.amount.toString(),
         userAddress: params.multicallExecutor,
         receiver: params.multicallExecutor,
         slippage: INTERNAL_SWAP_SLIPPAGE_BPS,
-        // Keep Phase 1 conservative: avoid legs that introduce permit2 / native routing complexity.
+        // Keep internal swap conservative: avoid legs that introduce permit2 / native routing complexity.
         excludeDEXS: INTERNAL_SWAP_EXCLUDE_DEXS,
       },
       timeout: 30_000,
@@ -654,6 +867,12 @@ export class SeamlessProtocol
       to: String(data?.txParams?.to ?? ''),
       data: String(data?.txParams?.data ?? ''),
       value: data?.txParams?.value,
+      srcAmount:
+        data?.srcAmount !== undefined
+          ? String(data?.srcAmount)
+          : data?.priceRoute?.srcAmount !== undefined
+          ? String(data?.priceRoute?.srcAmount)
+          : undefined,
     };
   }
 
@@ -663,7 +882,7 @@ export class SeamlessProtocol
   // getTopPoolsForToken. It is optional for a DEX
   // to implement this
   async updatePoolState(): Promise<void> {
-    // Phase 1: markets are static-config driven (no event pool), so there is nothing to update here.
+    // Markets are static-config driven (no event pool), so there is nothing to update here.
     return;
   }
 
@@ -678,12 +897,20 @@ export class SeamlessProtocol
     const pools: PoolLiquidity[] = [];
 
     for (const market of Object.values(this.config.marketsByLeverageToken)) {
+      if (!this.hasRequiredPeriphery(market)) continue;
+
       const lt = market.seamlessLeverageToken.leverageToken.toLowerCase();
       const collateral =
         market.seamlessLeverageToken.collateralToken.toLowerCase();
 
       // If token is collateral, it may map to multiple leverage tokens.
       if (token === collateral) {
+        if (
+          !this.isMintEnabled(market, SwapSide.SELL) &&
+          !this.isMintEnabled(market, SwapSide.BUY)
+        ) {
+          continue;
+        }
         pools.push({
           exchange: this.dexKey,
           address: market.seamlessLeverageToken.leverageToken,
@@ -701,6 +928,12 @@ export class SeamlessProtocol
 
       // If token is the leverage token, it maps to exactly one collateral token.
       if (token === lt) {
+        if (
+          !this.isRedeemEnabled(market, SwapSide.SELL) &&
+          !this.isRedeemEnabled(market, SwapSide.BUY)
+        ) {
+          continue;
+        }
         pools.push({
           exchange: this.dexKey,
           address: market.seamlessLeverageToken.leverageToken,
@@ -722,9 +955,36 @@ export class SeamlessProtocol
   // This is optional function in case if your implementation has acquired any resources
   // you need to release for graceful shutdown. For example, it may be any interval timer
   releaseResources(): AsyncOrSync<void> {
-    // Phase 1: best-effort cleanup to help Jest exit cleanly in long E2E runs.
+    // Best-effort cleanup to help Jest exit cleanly in long E2E runs.
     this.tokenDecimalsCache.clear();
     this.veloraSwapCallsCache.clear();
+    this.veloraSwapQuoteCache.clear();
     return;
+  }
+
+  private isMintEnabled(
+    market: DexParams['marketsByLeverageToken'][string],
+    side: SwapSide,
+  ): boolean {
+    if (side === SwapSide.SELL) return market.enableSellMint;
+    return market.enableBuyMint ?? market.enableSellMint;
+  }
+
+  private isRedeemEnabled(
+    market: DexParams['marketsByLeverageToken'][string],
+    side: SwapSide,
+  ): boolean {
+    if (side === SwapSide.SELL) return market.enableSellRedeem ?? false;
+    return market.enableBuyRedeem ?? market.enableSellRedeem ?? false;
+  }
+
+  private hasRequiredPeriphery(
+    market: DexParams['marketsByLeverageToken'][string],
+  ): boolean {
+    return Boolean(
+      market.seamlessPeriphery.leverageRouter &&
+        market.seamlessPeriphery.dexLeverageRouter &&
+        market.seamlessPeriphery.multicallExecutor,
+    );
   }
 }

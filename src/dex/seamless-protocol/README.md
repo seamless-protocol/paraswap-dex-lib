@@ -78,7 +78,7 @@ follows this split:
   - **no external API calls**
 - **Tx build (`getDexParam`)** can call Velora `/swap` to build internal `swapCalls`:
   - happens once per Seamless leg when building a transaction
-  - uses fixtures if configured; otherwise calls the live API
+  - always calls the live API
 
 ## Design
 
@@ -195,12 +195,6 @@ Deep dive + experiments: `john-onboarding/design/dex-integration/InternalLeverag
 3. **ABI + config wiring exists**
    - ABIs: `src/abi/seamless-protocol/LeverageRouter.json`, `LeverageManager.json`, `MulticallExecutor.json`
    - Config: `seamlessCore.leverageManager` + `seamlessPeriphery.leverageRouter` / `multicallExecutor`
-4. **Internal leverage swap route builder exists (Velora /swap)**
-   - Built as multicall `swapCalls` (`approve(0)`, `approve(amount)`, `call(augustus, tx.data)`).
-   - Strict fixture support:
-     - `SEAMLESS_VELORA_SWAP_FIXTURES_PATH`
-     - `SEAMLESS_VELORA_SWAP_FIXTURES_STRICT`
-   - code: `src/dex/seamless-protocol/seamless-protocol.ts`
 
 ### Operational requirements for real onchain execution (outstanding)
 
@@ -216,12 +210,9 @@ Deep dive + experiments: `john-onboarding/design/dex-integration/InternalLeverag
      mainnet state directly.
    - Use Tenderly VNet only when you need VNet-only deployments/state; otherwise it can introduce “fork block” mismatch
      issues.
-4. **Keep fixtures deterministic for CI**
-   - CI should run with strict fixtures so internal swap calldata does not drift as routing changes.
-   - Local iteration can remain non-strict (fallback to live `/swap`) until you decide to fully freeze.
-   - Optional convenience for local fixture authoring:
-   - set `SEAMLESS_VELORA_SWAP_FIXTURES_WRITE=1` to append missing `/swap` fixtures to
-     `SEAMLESS_VELORA_SWAP_FIXTURES_PATH` (do not enable in CI).
+4. **Track execution slippage in E2E**
+   - E2E validates quote vs simulation using a BPS tolerance.
+   - Tune tolerance with `SEAMLESS_E2E_MAX_SLIPPAGE_BPS` if routing conditions change.
 
 ## Outstanding scope details
 
@@ -245,30 +236,13 @@ TENDERLY_PROJECT=...
 # Defaults to https://api.paraswap.io if unset.
 VELORA_API_URL=https://api.paraswap.io
 
-# Optional: freeze Velora `/swap` responses for deterministic E2E.
-# When set, SeamlessProtocol will load fixtures from this file and use them instead of calling the live API
-# during tx-building. Pricing never calls the live API.
-SEAMLESS_VELORA_SWAP_FIXTURES_PATH=tests/fixtures/seamless-protocol/velora-swap.json
-# If set to `1`, missing fixtures are a hard error (no fallback to live API).
-# Recommendation:
-# - CI: strict (`CI=true` in the test environment; E2E enables strict mode by default)
-# - local: non-strict (allows fallback to live API if a fixture is missing)
-SEAMLESS_VELORA_SWAP_FIXTURES_STRICT=0
-# If set to `1` (local only), missing fixtures are fetched from the live API and appended to
-# `SEAMLESS_VELORA_SWAP_FIXTURES_PATH` automatically.
-# Do NOT enable this in CI.
-SEAMLESS_VELORA_SWAP_FIXTURES_WRITE=0
-
 # Optional: buffer (in bps) applied to redeem pricing to cover internal swap cost.
 # Defaults to the same bps used for /swap slippage (currently 100).
 SEAMLESS_INTERNAL_SWAP_BUFFER_BPS=100
 
-# Optional: pin block number in E2E (keeps previews + fixture keys in sync).
-SEAMLESS_E2E_PINNED_BLOCK_NUMBER=24387094
-
-# Optional: freeze ParaSwap `/prices` (getRate) response used by SeamlessProtocol E2E test 3 (USDC -> wstETH leg).
-# When set, the test will load the fixture instead of calling the live ParaSwap API.
-SEAMLESS_PARASWAP_RATE_FIXTURE_PATH=tests/fixtures/seamless-protocol/paraswap-rate-usdc-wsteth.json
+# Optional: max allowed quote-vs-sim divergence in E2E, in BPS.
+# Default: 400 (4%).
+SEAMLESS_E2E_MAX_SLIPPAGE_BPS=400
 
 # If you want DexLib to price and route through the local SeamlessProtocol module:
 # - unset E2E_TEST_ENDPOINT, OR
@@ -304,7 +278,7 @@ There are two separate “execution surfaces” involved:
    - Used for ERC20 `decimals()` and preview functions (`previewDeposit`, `previewRedeem`, `previewWithdraw`), etc.
    - Comes from `HTTP_PROVIDER_1` (DexHelper private provider).
 2. **Tenderly Simulation API (REST)**
-   - Used to “run” the transaction by simulating it against mainnet state at a pinned `block_number`, with
+   - Used to “run” the transaction by simulating it against mainnet state at the quote route `block_number`, with
      `state_objects` overrides (balances/allowances).
    - This is what makes tests deterministic without private keys or real funding.
    - Default path for SeamlessProtocol E2E is **Simulation API against mainnet state** (not VNet).
@@ -316,20 +290,14 @@ If you want to simulate against a Tenderly VNet instead of mainnet state, you mu
 
 Otherwise SeamlessProtocol E2E will force Simulation API even if `TENDERLY_VNET_ID` is set.
 
-### Determinism: pinned blocks + fixtures
+### Live API behavior and slippage checks
 
-E2E determinism hinges on keeping `blockNumber` and frozen fixtures aligned:
+E2E now uses live API responses for route construction and validates execution with a BPS tolerance:
 
-- Internal leverage swap route fixtures:
-  - `tests/fixtures/seamless-protocol/velora-swap.json` freezes Velora `/swap` txParams for the internal swapCalls
-    (debtAsset -> collateral).
-  - In CI, run with strict fixtures so tests never call live `/swap` (see env vars below).
-  - If you change the pinned block, quote outputs (`previewDeposit` under the hood) change slightly → `flashLoanAmount` changes
-    → you will need a new `/swap` fixture entry for the new key.
-- AnyToken E2E (USDC -> ... -> wstETH -> LT) also uses a frozen ParaSwap `/prices` fixture:
-  - `tests/fixtures/seamless-protocol/paraswap-rate-usdc-wsteth.json`
-  - This pins the intermediate wstETH amount _and_ provides the `blockNumber` for that test.
-  - **Fixture gotcha:** if you change the pinned block, refresh the fixture so the route stays consistent.
+- AnyToken E2E (USDC -> ... -> wstETH -> LT) fetches a live ParaSwap route, appends the local Seamless leg, and then
+  checks quote-vs-simulation divergence in BPS.
+- Use `SEAMLESS_E2E_MAX_SLIPPAGE_BPS` to tune tolerance for CI/runtime conditions.
+- The LT -> collateral redeem simulation is currently skipped in fixture-free mode due upstream live-route instability.
 
 ```bash
 # All integration tests for this DEX module
@@ -361,19 +329,11 @@ TENDERLY_TOKEN=...
 TENDERLY_ACCOUNT_ID=...
 TENDERLY_PROJECT=...
 
-# Pinned block for the single-leg E2E (wstETH -> LT)
-SEAMLESS_E2E_PINNED_BLOCK_NUMBER=24387094
-
 # Velora/ParaSwap API base URL used to build the *internal leverage swap route* (debtAsset -> collateral)
 VELORA_API_URL=https://api.paraswap.io
 
-# Freeze Velora /swap responses for deterministic E2E (recommended in CI)
-SEAMLESS_VELORA_SWAP_FIXTURES_PATH=tests/fixtures/seamless-protocol/velora-swap.json
-# In CI set to 1 (strict). Locally keep unset/0 to allow live `/swap` for faster iteration.
-SEAMLESS_VELORA_SWAP_FIXTURES_STRICT=0
-
-# Freeze ParaSwap /prices response for the AnyToken E2E (USDC -> ... -> LT)
-SEAMLESS_PARASWAP_RATE_FIXTURE_PATH=tests/fixtures/seamless-protocol/paraswap-rate-usdc-wsteth.json
+# Max allowed quote-vs-sim divergence in E2E, in BPS
+SEAMLESS_E2E_MAX_SLIPPAGE_BPS=400
 ```
 
 ### Testing enhancements (optional)

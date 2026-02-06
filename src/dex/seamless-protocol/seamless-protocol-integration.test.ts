@@ -657,63 +657,70 @@ describe('SeamlessProtocol', function () {
       console.table(metaRows);
     });
 
-    it('4. Check Buy Prices (all configured markets)', async function () {
-      for (const market of Object.values(marketConfig.marketsByLeverageToken)) {
-        if (!(market.enableBuyMint ?? market.enableSellMint ?? false)) continue;
+    it(
+      '4. Check Buy Prices (all configured markets)',
+      async function () {
+        for (const market of Object.values(
+          marketConfig.marketsByLeverageToken,
+        )) {
+          if (!(market.enableBuyMint ?? market.enableSellMint ?? false))
+            continue;
 
-        const collateralToken =
-          tokensByAddress.get(
-            market.seamlessLeverageToken.collateralToken.toLowerCase(),
-          ) ?? null;
-        const leverageToken =
-          tokensByAddress.get(
-            market.seamlessLeverageToken.leverageToken.toLowerCase(),
-          ) ?? null;
-        const debtToken =
-          tokensByAddress.get(
-            market.seamlessLeverageToken.debtToken.toLowerCase(),
-          ) ?? null;
+          const collateralToken =
+            tokensByAddress.get(
+              market.seamlessLeverageToken.collateralToken.toLowerCase(),
+            ) ?? null;
+          const leverageToken =
+            tokensByAddress.get(
+              market.seamlessLeverageToken.leverageToken.toLowerCase(),
+            ) ?? null;
+          const debtToken =
+            tokensByAddress.get(
+              market.seamlessLeverageToken.debtToken.toLowerCase(),
+            ) ?? null;
 
-        expect(collateralToken).not.toBeNull();
-        expect(leverageToken).not.toBeNull();
-        expect(debtToken).not.toBeNull();
+          expect(collateralToken).not.toBeNull();
+          expect(leverageToken).not.toBeNull();
+          expect(debtToken).not.toBeNull();
 
-        const unit = BI_POWS[leverageToken!.decimals];
-        const buyAmounts = [
-          0n,
-          1n * unit,
-          2n * unit,
-          3n * unit,
-          4n * unit,
-          5n * unit,
-          6n * unit,
-          7n * unit,
-          8n * unit,
-          9n * unit,
-          10n * unit,
-        ];
+          const unit = BI_POWS[leverageToken!.decimals];
+          const buyAmounts = [
+            0n,
+            1n * unit,
+            2n * unit,
+            3n * unit,
+            4n * unit,
+            5n * unit,
+            6n * unit,
+            7n * unit,
+            8n * unit,
+            9n * unit,
+            10n * unit,
+          ];
 
-        const leverageRouterAddress = market.seamlessPeriphery.leverageRouter;
-        const leverageManagerAddress = market.seamlessCore.leverageManager;
-        expect(leverageRouterAddress).toBeDefined();
-        expect(leverageManagerAddress).toBeDefined();
+          const leverageRouterAddress = market.seamlessPeriphery.leverageRouter;
+          const leverageManagerAddress = market.seamlessCore.leverageManager;
+          expect(leverageRouterAddress).toBeDefined();
+          expect(leverageManagerAddress).toBeDefined();
 
-        await testPricingOnNetwork(
-          seamlessProtocol,
-          network,
-          dexKey,
-          blockNumber,
-          collateralToken!,
-          leverageToken!,
-          SwapSide.BUY,
-          buyAmounts,
-          leverageToken!.address,
-          leverageRouterAddress!,
-          leverageManagerAddress!,
-          'mintExactOut',
-        );
-      }
-    });
+          await testPricingOnNetwork(
+            seamlessProtocol,
+            network,
+            dexKey,
+            blockNumber,
+            collateralToken!,
+            leverageToken!,
+            SwapSide.BUY,
+            buyAmounts,
+            leverageToken!.address,
+            leverageRouterAddress!,
+            leverageManagerAddress!,
+            'mintExactOut',
+          );
+        }
+      },
+      300 * 1000,
+    );
 
     it('5. Check Sell Redeem Prices (all configured markets)', async function () {
       for (const market of Object.values(marketConfig.marketsByLeverageToken)) {

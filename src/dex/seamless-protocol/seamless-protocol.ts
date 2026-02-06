@@ -1,7 +1,5 @@
 import { Interface } from '@ethersproject/abi';
 import axios from 'axios';
-import * as fs from 'fs';
-import * as path from 'path';
 import { AsyncOrSync } from 'ts-essentials';
 import {
   Token,
@@ -48,10 +46,6 @@ const INTERNAL_SWAP_BUFFER_BPS = (() => {
 const MAX_BRACKET_ITERATIONS = 64;
 const MAX_BINARY_SEARCH_ITERATIONS = 128;
 const MAX_UINT256 = (1n << 256n) - 1n;
-const VELORA_SWAP_FIXTURES_PATH_ENV = 'SEAMLESS_VELORA_SWAP_FIXTURES_PATH';
-const VELORA_SWAP_FIXTURES_STRICT_ENV = 'SEAMLESS_VELORA_SWAP_FIXTURES_STRICT';
-const VELORA_SWAP_FIXTURES_WRITE_ENV = 'SEAMLESS_VELORA_SWAP_FIXTURES_WRITE';
-const VELORA_SWAP_FIXTURES_STRICT_DEFAULT = false;
 type VeloraSwapTxParams = {
   to: Address;
   data: string;
@@ -114,10 +108,6 @@ export class SeamlessProtocol
   protected config: DexParams;
   private readonly veloraApiUrl: string;
   private readonly tokenDecimalsCache = new Map<string, number>();
-  private readonly veloraSwapFixturesPath?: string;
-  private readonly veloraSwapFixtures?: Map<string, VeloraSwapTxParams>;
-  private readonly veloraSwapFixturesStrict: boolean;
-  private readonly veloraSwapFixturesWrite: boolean;
   private readonly veloraSwapCallsCache = new Map<
     string,
     [Address, NumberAsString, string][]
@@ -146,31 +136,6 @@ export class SeamlessProtocol
       process.env.VELORA_API_URL ||
       process.env.SEAMLESS_VELORA_API_URL ||
       DEFAULT_VELORA_API_URL;
-
-    this.veloraSwapFixturesStrict =
-      (process.env[VELORA_SWAP_FIXTURES_STRICT_ENV] ?? '') === '1' ||
-      VELORA_SWAP_FIXTURES_STRICT_DEFAULT;
-    this.veloraSwapFixturesWrite =
-      (process.env[VELORA_SWAP_FIXTURES_WRITE_ENV] ?? '') === '1';
-    const fixturesPath = process.env[VELORA_SWAP_FIXTURES_PATH_ENV];
-    if (fixturesPath) {
-      const resolvedPath = path.isAbsolute(fixturesPath)
-        ? fixturesPath
-        : path.resolve(process.cwd(), fixturesPath);
-      this.veloraSwapFixturesPath = resolvedPath;
-      this.veloraSwapFixtures = this.loadVeloraSwapFixtures(resolvedPath);
-      this.logger.info(
-        `${this.dexKey}-${this.network}: loaded ${this.veloraSwapFixtures.size} Velora /swap fixtures from ${resolvedPath}`,
-      );
-    } else if (this.veloraSwapFixturesWrite) {
-      throw new Error(
-        `${this.dexKey}-${this.network}: ${VELORA_SWAP_FIXTURES_WRITE_ENV}=1 requires ${VELORA_SWAP_FIXTURES_PATH_ENV} to be set`,
-      );
-    } else if (this.veloraSwapFixturesStrict) {
-      throw new Error(
-        `${this.dexKey}-${this.network}: ${VELORA_SWAP_FIXTURES_STRICT_ENV}=1 requires ${VELORA_SWAP_FIXTURES_PATH_ENV} to be set`,
-      );
-    }
   }
 
   // Initialize pricing is called once in the start of
@@ -793,25 +758,13 @@ export class SeamlessProtocol
       throw new Error(`${this.dexKey} missing augustusV6Address in config`);
     }
 
-    let txParams = this.veloraSwapFixtures?.get(fixtureKey);
-    const loadedFromFixture = Boolean(txParams);
-    if (!txParams) {
-      if (this.veloraSwapFixtures && this.veloraSwapFixturesStrict) {
-        throw new Error(
-          `${this.dexKey} missing Velora /swap fixture for key=${fixtureKey}`,
-        );
-      }
-      txParams = await this.fetchVeloraSwapTxParams({
-        srcToken: params.srcToken,
-        destToken: params.destToken,
-        multicallExecutor: params.multicallExecutor,
-        amount: params.amount,
-        side: params.side,
-      });
-      if (this.veloraSwapFixturesWrite && this.veloraSwapFixturesPath) {
-        this.persistVeloraSwapFixture(fixtureKey, txParams);
-      }
-    }
+    const txParams = await this.fetchVeloraSwapTxParams({
+      srcToken: params.srcToken,
+      destToken: params.destToken,
+      multicallExecutor: params.multicallExecutor,
+      amount: params.amount,
+      side: params.side,
+    });
     if (!txParams?.to || !txParams?.data) {
       throw new Error(
         `${this.dexKey} invalid Velora /swap response (missing txParams.to/data)`,
@@ -859,12 +812,9 @@ export class SeamlessProtocol
       [to, '0', String(txParams.data)],
     ];
     this.veloraSwapCallsCache.set(fixtureKey, calls);
-    // Reduce log noise: only log fixture sourcing when useful during local iteration.
-    if (!loadedFromFixture) {
-      this.logger.info(
-        `${this.dexKey}-${this.network}: built internal swapCalls via live /swap (fixtureKey=${fixtureKey})`,
-      );
-    }
+    this.logger.info(
+      `${this.dexKey}-${this.network}: built internal swapCalls via live /swap (fixtureKey=${fixtureKey})`,
+    );
     return calls;
   }
 
@@ -890,93 +840,6 @@ export class SeamlessProtocol
       params.slippageBps,
       params.excludeDEXS,
     ].join(':');
-  }
-
-  private persistVeloraSwapFixture(
-    fixtureKey: string,
-    txParams: VeloraSwapTxParams,
-  ): void {
-    if (!this.veloraSwapFixturesPath) return;
-    if (!this.veloraSwapFixturesWrite) return;
-    // Never write fixtures in CI.
-    if (process.env.CI) return;
-
-    let json: any = {};
-    try {
-      json = JSON.parse(fs.readFileSync(this.veloraSwapFixturesPath, 'utf8'));
-    } catch {
-      json = {};
-    }
-
-    if (!json || typeof json !== 'object') json = {};
-    if (!json.fixtures || typeof json.fixtures !== 'object') {
-      json.fixtures = {};
-    }
-
-    if (json.fixtures[fixtureKey]) return;
-
-    json.meta = json.meta ?? {
-      notes:
-        'Velora /swap fixtures used to build SeamlessProtocol internal leverage swapCalls deterministically in E2E.',
-      keyFormat:
-        'network:version:side:srcToken:destToken:amount:userAddress:receiver:slippageBps:excludeDEXS',
-    };
-
-    // Keep a stable shape so fixtures can be migrated without changing the loader.
-    json.fixtures[fixtureKey] = { txParams };
-
-    fs.writeFileSync(
-      this.veloraSwapFixturesPath,
-      JSON.stringify(json, null, 2) + '\n',
-    );
-
-    // Update in-memory fixtures map for the current process.
-    this.veloraSwapFixtures?.set(fixtureKey, txParams);
-
-    this.logger.info(
-      `${this.dexKey}-${this.network}: wrote Velora /swap fixture key=${fixtureKey} to ${this.veloraSwapFixturesPath}`,
-    );
-  }
-
-  private loadVeloraSwapFixtures(
-    resolvedPath: string,
-  ): Map<string, VeloraSwapTxParams> {
-    const raw = fs.readFileSync(resolvedPath, 'utf8');
-    const json = JSON.parse(raw) as {
-      fixtures?: Record<string, unknown>;
-    };
-    const fixtures = json.fixtures;
-    if (!fixtures || typeof fixtures !== 'object') {
-      throw new Error(
-        `${this.dexKey}-${this.network}: invalid Velora swap fixtures file (missing 'fixtures') at ${resolvedPath}`,
-      );
-    }
-
-    const map = new Map<string, VeloraSwapTxParams>();
-    for (const [key, entry] of Object.entries(fixtures)) {
-      const entryObj = entry as any;
-      const maybeTx = entryObj?.txParams ?? entryObj;
-      const to = maybeTx?.to;
-      const data = maybeTx?.data;
-      const value = maybeTx?.value;
-      const srcAmount =
-        maybeTx?.srcAmount ??
-        entryObj?.srcAmount ??
-        entryObj?.priceRoute?.srcAmount;
-      if (!to || !data) {
-        throw new Error(
-          `${this.dexKey}-${this.network}: invalid fixture for key=${key} (missing txParams.to/data)`,
-        );
-      }
-      map.set(key, {
-        to: String(to),
-        data: String(data),
-        value: value !== undefined ? String(value) : undefined,
-        srcAmount: srcAmount !== undefined ? String(srcAmount) : undefined,
-      });
-    }
-
-    return map;
   }
 
   private async fetchVeloraSwapTxParams(params: {

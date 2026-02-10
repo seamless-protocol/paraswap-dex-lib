@@ -4,13 +4,12 @@
 
 Seamless Protocol is a DeFi lending/borrowing protocol.
 
-The primary primitive relevant to this repo is **Leverage Tokens (LTs)**: ERC-20 share tokens that represent an
-automated leveraged position. Users can mint/redeem LT shares through Seamless periphery (flashloan + internal swaps +
-manager accounting), and aggregators can integrate that mint/redeem path as a DEX-like “venue” leg.
+The Seamless Leverage Token protocol is comprised of smart contracts that provide ERC20 tokenized representations of any leveraged position between 2 assets on a blockchain. If a lending market exists between 2 assets then a Leverage Token can be permissionlessly created for the leveraged position.
 
-This folder (`src/dex/seamless-protocol/`) implements a **ParaSwap DexLib “DEX module”** for Seamless LTs.
+The primary primitive relevant to paraswap-dex-lib is the **Seamless Leverage Token (LT)**. Users can mint/redeem LT shares through Seamless periphery (flashloan + internal swaps +
+manager accounting), and Paraswap can integrate that mint/redeem path as a DEX-like “venue” leg.
 
-### Seamless and Velora
+### Seamless and Velora(Paraswap)
 
 Seamless are adding Markets for each leverage token. Each market will have the ability to support 4 swap legs.
 
@@ -59,70 +58,6 @@ Other fields are required for quote/tx building but do not change mint vs redeem
 - `network`, `version`, `srcDecimals`, `destDecimals`, `userAddress`, `receiver`, `slippage`
 - Optional route controls: `includeDEXS`, `excludeDEXS`, `route`
 
-## Design
-
-### Assumptions
-
-- Doing a reverse binary search for Collateral->LT ExactOut has acceptable performance, and we do not need to set it as false?
-- Configuration for which Legs are supported is required at the Market (LeverageToken) level (i.e. we may have some leverage tokens which don't support a specific leg)
-- Initial Supported Leverage Tokens are hardcoded in `config.ts`
-- Future phase will involve having dynamic deployed LeverageToken support via an onchain registry (or possibly event driven).
-- Static Price Population will be done initially using `getDexParam` (which will include an API call rather than an oracle lookup for the debt to collateral price for internal swaps
-- Dynamic Price population will be done per quote request using `getPricesVolume` as this needs to be performant we will use an oracle lookup rather than an API call and accept there may be slippage implications.
-
-### Initializing your DEX's pools state
-
-### Keeping your DEX's pools state in sync
-
-### Calculating your DEX's rates for a token pair and specific amount ranges
-
-### Allow Augustus to swap through your DEX
-
-#### Sample Swap Transaction Trace (Mint/Redeem, ExactIn, ExactOut)
-
-### Signal the most liquid tokens of your DEX
-
-### Recipient Handling and Intermediate Balances
-
-### Exact Out calculation approaches
-
-Currently, leverage-tokens has functionality to use exactOut on swaps for redeem using `redeemWithVelora`
-
-| Use case                                          | leverage-tokens (protocol)                                                                                                                                                                                                                                                                                                                                                        | src/dex/seamless-protocol (TypeScript)                                                                                                                | Same logic? |
-| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| Collateral -> LT ExactOut (BUY, target sharesOut) | Native exact-out primitive: ILeverageManager.previewMint(ILeverageToken,uint256) + ILeverageManager.mint(ILeverageToken,uint256,uint256); router execution used in this integration is ILeverageRouter.previewDeposit(ILeverageToken,uint256) + ILeverageRouter.deposit(ILeverageToken,uint256,uint256,uint256,IMulticallExecutor,IMulticallExecutor.Call[]) with minShares guard | getPricesVolume(srcToken: Token, destToken: Token, amounts: bigint[], side: SwapSide, blockNumber: number, limitPools?: string[]): Promise<null \| No |
-
-Signature refs for src/dex/seamless-protocol:
-
-- `async getPricesVolume(srcToken: Token, destToken: Token, amounts: bigint[], side: SwapSide, blockNumber: number, limitPools?: string[]): Promise<null | ExchangePrices<SeamlessProtocolData>>`
-- `async getDexParam(srcToken: Address, destToken: Address, srcAmount: NumberAsString, destAmount: NumberAsString, \_recipient: Address, data: SeamlessProtocolData, side: SwapSide): Promise<DexExchangeParam>`
-- `private async quoteMintExactOut(params: { leverageToken: Address; leverageRouter: Address; sharesOut: bigint; blockNumber: number; }): Promise<{ collateralFromSender: bigint; action: ActionData; rawFlashLoanAmount:bigint; flashLoanAmount: bigint; }>`
-
-#### Existing Exact Out using `redeemWithVelora`
-
-#### Alternate approach using Binary Search
-
-### Use of Velora Market API
-
-Slippage can occur as `previewDeposit` used Adapter conversions which are oracle/state based (Aave/Morpho oracle math) and actual swaps use Paraswap pool routing.
-
-For example
-
-- (debt = 1227583834202275711), sample slippage is 100 (that is 1%, and it is a max tolerance setting, not the realized price impact).
-- Sample Oracle call and value:
-  - `cast call 0xB22cd280b29e581e34423E86F65fd259F456D335 "convertDebtToCollateralAsset(uint256)(uint256)" 1227583834202275711 --block 24422367 --rpc-url https://mainnet.gateway.tenderly.co/7GsNry3NUKrugHF3iat2rd`
-  - returns `1000776459984034246 wstETH`
-- Sample Paraswap.io call and value:
-  - `curl -sG "https://api.paraswap.io/swap" ... side=SELL srcToken=WETH destToken=wstETH amount=1227583834202275711 slippage=100 excludeDEXS=Native,UniswapV4 returns priceRoute.destAmount = 1001930315589943119 wstETH`
-  - returns `+1162747304411996 wei`
-- So execution using paraswap would be (+0.1162%) above the oracle-implied conversion.
-
-### Alternate Solutions
-
-#### Adding Recipient to LeverageRouter
-
-#### Adding Quote Functionality to LeverageRouter
-
 LeverageManager has these 4 quote functions which are associated with (`deposit`, `mint`, `redeeem` and `withdraw`)
 
 - `function previewDeposit(ILeverageToken token, uint256 collateral) external view returns (ActionData memory);`
@@ -141,6 +76,134 @@ LeverageManager has these 4 quote functions which are associated with (`deposit`
   - Input is target collateral out.
   - Output tells you required shares in (shares) and debt to repay (debt).
   - “If I want Y collateral out, how many shares must I burn?”
+
+## Design
+
+### Assumptions
+
+- Doing a reverse binary search for Collateral->LT ExactOut has acceptable performance, and we do not need to set it as false?
+- Configuration for which Legs are supported is required at the Market (LeverageToken) level (i.e. we may have some leverage tokens which don't support a specific leg)
+- Initial Supported Leverage Tokens are hardcoded in `config.ts`
+- Future phase will involve having dynamic deployed LeverageToken support via an onchain registry (or possibly event driven).
+- Static Price Population will be done initially using `getDexParam` (which will include an API call rather than an oracle lookup for the debt to collateral price for internal swaps
+- Dynamic Price population will be done per quote request using `getPricesVolume` as this needs to be performant we will use an oracle lookup rather than an API call and accept there may be slippage implications.
+
+### Defining Routes and Initializing Pool State
+
+### Synchronizing Pool State
+
+### Pricing and calculation of rates for token pairs and amounts
+
+### Pricing and Quoting Functionality - Internal Collateral to Debt Swap Leg
+
+#### Seamless use of Price Oracles for Collateral to Debt Token Pricing
+
+Seamless Protocol Leverage Tokens rely on a lending market and the use of a lending Adapter for that Market.
+The Market itself has a price Oracle which is used to retrieve prices between Debt and Collateral Tokens.
+The example Leverage Token is based on a Morpho Market. However, the concept of lending markets having an asscociated price oracle is not Morpho specific.
+
+Sample Contract Relationship
+
+- Leverage Token
+  - Collateral Token
+  - Debt Token
+  - Lending Adapter
+    - `morphoMarketId`
+    - `marketParams`
+      - address `loanToken`;
+      - address `collateralToken`;
+      - address `oracle`; //This is the Oracle Address used by the Leverage Token
+      - address `irm`;
+      - uint256 `lltv`;
+
+Sample Oracle call and value:
+
+- `cast call 0xB22cd280b29e581e34423E86F65fd259F456D335 "convertDebtToCollateralAsset(uint256)(uint256)" 1227583834202275711 --block 24422367 --rpc-url https://mainnet.gateway.tenderly.co/7GsNry3NUKrugHF3iat2rd`
+- returns `1000776459984034246 wstETH`
+
+#### Use of Velora Market API (6.2) for Collateral to Debt Token Pricing
+
+Slippage can occur as `previewDeposit` uses Adapter conversions which are oracle/state based (Aave/Morpho oracle math) and actual swaps use Paraswap pool routing.
+The Oracle Price is used in quoting (for performance reasons) and the API price is used in execution to build the internal collateral to debt swap.
+
+In the example below we see a higher price returned from the oracle. This would lead to slippage between the quote and execution price.
+
+- Oracle Price: 1000776459984034246
+- API Price : 1225269407591408937
+
+- slippage = (API - Oracle) / Oracle
+  - = (1225269407591408937 - 1000776459984034246) / 1000776459984034246
+  - = 0.2243187731 → 22.4319%
+
+Sample Paraswap Price (Quote) Call for Internal Collateral to Debt Swap Leg
+Following is a subset of the result payload for the complete payload see Appendix G: Sample API Request and Response
+
+Example API call
+
+```bash
+  curl -sG "https://api.paraswap.io/prices" \
+    --data-urlencode "network=1" \
+    --data-urlencode "version=6.2" \
+    --data-urlencode "side=SELL" \
+    --data-urlencode "srcToken=0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0" \
+    --data-urlencode "srcDecimals=18" \
+    --data-urlencode "destToken=0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" \
+    --data-urlencode "destDecimals=18" \
+    --data-urlencode "amount=1000000000000000000"
+```
+
+Example API Result
+
+```json
+{
+  "priceRoute": {
+    "blockNumber": 24427317,
+    "network": 1,
+    "srcToken": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+    "srcDecimals": 18,
+    "srcAmount": "1000000000000000000",
+    "destToken": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+    "destDecimals": 18,
+    "destAmount": "1225269407591408937"
+  }
+}
+```
+
+Slippage can occur as `previewDeposit` used Adapter conversions which are oracle/state based (Aave/Morpho oracle math) and actual swaps use Paraswap pool routing.
+
+### Integrating with Augustus
+
+### Signalling the most liquid tokens
+
+## DEX Integration Walkthrough (5 Steps)
+
+### Step 1/5: Initializing your DEX's pools state
+
+### Step 2/5: Keeping your DEX's pools state in sync
+
+### Step 3/5: Calculating your DEX's rates for a token pair and specific amount ranges
+
+### Step 4/5: Allow Augustus to swap through your DEX
+
+### Step 5/5: Signal the most liquid tokens of your DEX
+
+#### Sample Swap Transaction Trace (Mint/Redeem, ExactIn, ExactOut)
+
+### Signal the most liquid tokens of your DEX
+
+### Recipient Handling and Intermediate Balances
+
+### Exact Out calculation approaches
+
+#### Existing Exact Out using `redeemWithVelora`
+
+#### Alternate approach using Binary Search
+
+### Alternate Solutions
+
+#### Adding Recipient to LeverageRouter
+
+#### Adding Quote Functionality to LeverageRouter
 
 #### Using Tycho for Intermediate Legs
 
@@ -472,3 +535,187 @@ For example (previewDeposit(token, 1e18) returning collateral=200077645998403427
 - debt via \_convertCollateralToDebt (:327, formula at :602)
 - shares via \_convertCollateralToShares (:336, formula at :650)
   Result: debt=1227583834202275711, shares=832089289353448791.
+
+Appendix G: Sample API Request and Response
+
+Sample Request
+
+```bash
+  curl -sG "https://api.paraswap.io/prices" \
+    --data-urlencode "network=1" \
+    --data-urlencode "version=6.2" \
+    --data-urlencode "side=SELL" \
+    --data-urlencode "srcToken=0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0" \
+    --data-urlencode "srcDecimals=18" \
+    --data-urlencode "destToken=0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" \
+    --data-urlencode "destDecimals=18" \
+    --data-urlencode "amount=1000000000000000000"
+```
+
+Sample Response
+
+```json
+{
+  "priceRoute": {
+    "blockNumber": 24427317,
+    "network": 1,
+    "srcToken": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+    "srcDecimals": 18,
+    "srcAmount": "1000000000000000000",
+    "destToken": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+    "destDecimals": 18,
+    "destAmount": "1225269407591408937",
+    "bestRoute": [
+      {
+        "percent": 100,
+        "swaps": [
+          {
+            "srcToken": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+            "srcDecimals": 18,
+            "destToken": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "destDecimals": 18,
+            "swapExchanges": [
+              {
+                "exchange": "BalancerV3",
+                "srcAmount": "1000000000000000000",
+                "destAmount": "1225269407591408937",
+                "percent": 100,
+                "poolAddresses": ["0x6b31a94029fd7840d780191b6d63fa0d269bd883"],
+                "poolIdentifiers": [
+                  "0x6b31a94029fd7840d780191b6d63fa0d269bd883"
+                ],
+                "data": {
+                  "steps": [
+                    {
+                      "pool": "0x2411802d8bea09be0af8fd8d08314a63e706b29c",
+                      "isBuffer": true,
+                      "swapInput": {
+                        "tokenIn": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+                        "tokenOut": "0x2411802d8bea09be0af8fd8d08314a63e706b29c"
+                      },
+                      "poolState": {
+                        "poolType": "Buffer",
+                        "rate": "1038061086756000000",
+                        "poolAddress": "0x2411802d8bea09be0af8fd8d08314a63e706b29c",
+                        "tokens": [
+                          "0x2411802d8bea09be0af8fd8d08314a63e706b29c",
+                          "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0"
+                        ],
+                        "maxDeposit": "170141183460469147991267277926373703264",
+                        "maxMint": "163902862395285458201283032707965059521"
+                      }
+                    },
+                    {
+                      "pool": "0x6b31a94029fd7840d780191b6d63fa0d269bd883",
+                      "isBuffer": false,
+                      "swapInput": {
+                        "tokenIn": "0x2411802d8bea09be0af8fd8d08314a63e706b29c",
+                        "tokenOut": "0x90551c1795392094fe6d29b758eccd233cfaa260"
+                      },
+                      "poolState": {
+                        "poolAddress": "0x6b31a94029fd7840d780191b6d63fa0d269bd883",
+                        "version": 1,
+                        "tokens": [
+                          "0x2411802d8bea09be0af8fd8d08314a63e706b29c",
+                          "0x90551c1795392094fe6d29b758eccd233cfaa260"
+                        ],
+                        "tokensUnderlying": [
+                          "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+                          "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+                        ],
+                        "weights": ["0", "0"],
+                        "poolType": "STABLE",
+                        "hookAddress": "0xb18fa0cb5de8cecb8899aae6e38b1b7ed77885da",
+                        "hookType": "StableSurge",
+                        "supportsUnbalancedLiquidity": true,
+                        "paramsAlpha": "0",
+                        "paramsBeta": "0",
+                        "paramsC": "0",
+                        "paramsS": "0",
+                        "paramsLambda": "0",
+                        "tauAlphaX": "0",
+                        "tauAlphaY": "0",
+                        "tauBetaX": "0",
+                        "tauBetaY": "0",
+                        "u": "0",
+                        "v": "0",
+                        "w": "0",
+                        "z": "0",
+                        "dSq": "0",
+                        "tokenRates": [
+                          "1273398903941547233",
+                          "1068142945570000000"
+                        ],
+                        "balancesLiveScaled18": [
+                          "2285010783360894789224",
+                          "1026169185079119847399"
+                        ],
+                        "swapFee": "20000000000000",
+                        "aggregateSwapFee": "500000000000000000",
+                        "totalSupply": "3238281579670185089070",
+                        "scalingFactors": ["1", "1"],
+                        "isPoolPaused": false,
+                        "amp": "900000",
+                        "ampIsUpdating": false,
+                        "ampStartValue": "700000",
+                        "ampEndValue": "900000",
+                        "ampStartTime": "1769008895",
+                        "ampStopTime": "1769212800",
+                        "erc4626Rates": [
+                          "1038061086756000000",
+                          "1068142945570000000"
+                        ],
+                        "erc4626MaxDeposit": [
+                          "170141183460469147991267277926373703264",
+                          "170141183460469130561742956659940646565"
+                        ],
+                        "erc4626MaxMint": [
+                          "163902862395285458201283032707965059521",
+                          "159286904590916522830116655076324220979"
+                        ]
+                      }
+                    },
+                    {
+                      "pool": "0x90551c1795392094fe6d29b758eccd233cfaa260",
+                      "isBuffer": true,
+                      "swapInput": {
+                        "tokenIn": "0x90551c1795392094fe6d29b758eccd233cfaa260",
+                        "tokenOut": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+                      },
+                      "poolState": {
+                        "poolType": "Buffer",
+                        "rate": "1068142945570000000",
+                        "poolAddress": "0x90551c1795392094fe6d29b758eccd233cfaa260",
+                        "tokens": [
+                          "0x90551c1795392094fe6d29b758eccd233cfaa260",
+                          "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+                        ],
+                        "maxDeposit": "170141183460469130561742956659940646565",
+                        "maxMint": "159286904590916522830116655076324220979"
+                      }
+                    }
+                  ],
+                  "gasUSD": "0.164403"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "gasCostUSD": "0.192710",
+    "gasCost": "331810",
+    "side": "SELL",
+    "version": "6.2",
+    "contractAddress": "0x6a000f20005980200259b80c5102003040001068",
+    "tokenTransferProxy": "0x6a000f20005980200259b80c5102003040001068",
+    "contractMethod": "swapExactAmountIn",
+    "partnerFee": 0.01,
+    "srcUSD": "2479.8600000000",
+    "destUSD": "2479.6634690013",
+    "partner": "anon",
+    "maxImpactReached": false,
+    "hmac": "0c22f7e589c5ee2fb35fd667763c474960540ee8"
+  }
+}
+```

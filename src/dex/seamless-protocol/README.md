@@ -118,6 +118,8 @@ Sample Contract Relationship
 
 Sample Oracle call and value:
 
+- `cast call 0xB22cd280b29e581e34423E86F65fd259F456D335 "convertCollateralToDebtAsset(uint256)(uint256)" 1000000000000000000 --rpc-url https://mainnet.gateway.tenderly.co/7GsNry3NUKrugHF3iat2rd`
+- returns `1226709025305043763 wETH`
 - `cast call 0xB22cd280b29e581e34423E86F65fd259F456D335 "convertDebtToCollateralAsset(uint256)(uint256)" 1227583834202275711 --block 24422367 --rpc-url https://mainnet.gateway.tenderly.co/7GsNry3NUKrugHF3iat2rd`
 - returns `1000776459984034246 wstETH`
 
@@ -128,12 +130,12 @@ The Oracle Price is used in quoting (for performance reasons) and the API price 
 
 In the example below we see a higher price returned from the oracle. This would lead to slippage between the quote and execution price.
 
-- Oracle Price: 1000776459984034246
+- Oracle Price: 1226709025305043763
 - API Price : 1225269407591408937
 
 - slippage = (API - Oracle) / Oracle
-  - = (1225269407591408937 - 1000776459984034246) / 1000776459984034246
-  - = 0.2243187731 → 22.4319%
+  - = (1225269407591408937 - 1226709025305043763) / 1226709025305043763
+  - = -0.00117357 → -0.1174%
 
 Sample Paraswap Price (Quote) Call for Internal Collateral to Debt Swap Leg
 Following is a subset of the result payload for the complete payload see Appendix G: Sample API Request and Response
@@ -557,14 +559,14 @@ Sample Response
 ```json
 {
   "priceRoute": {
-    "blockNumber": 24427317,
+    "blockNumber": 24427701,
     "network": 1,
     "srcToken": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
     "srcDecimals": 18,
     "srcAmount": "1000000000000000000",
     "destToken": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
     "destDecimals": 18,
-    "destAmount": "1225269407591408937",
+    "destAmount": "1225321457601530719",
     "bestRoute": [
       {
         "percent": 100,
@@ -578,7 +580,7 @@ Sample Response
               {
                 "exchange": "BalancerV3",
                 "srcAmount": "1000000000000000000",
-                "destAmount": "1225269407591408937",
+                "destAmount": "1225321457601530719",
                 "percent": 100,
                 "poolAddresses": ["0x6b31a94029fd7840d780191b6d63fa0d269bd883"],
                 "poolIdentifiers": [
@@ -595,14 +597,14 @@ Sample Response
                       },
                       "poolState": {
                         "poolType": "Buffer",
-                        "rate": "1038061086756000000",
+                        "rate": "1038061261361000000",
                         "poolAddress": "0x2411802d8bea09be0af8fd8d08314a63e706b29c",
                         "tokens": [
                           "0x2411802d8bea09be0af8fd8d08314a63e706b29c",
                           "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0"
                         ],
-                        "maxDeposit": "170141183460469147991267277926373703264",
-                        "maxMint": "163902862395285458201283032707965059521"
+                        "maxDeposit": "170141183460469147948298304428793086681",
+                        "maxMint": "163902834826335191190600937384355534952"
                       }
                     },
                     {
@@ -643,12 +645,12 @@ Sample Response
                         "z": "0",
                         "dSq": "0",
                         "tokenRates": [
-                          "1273398903941547233",
-                          "1068142945570000000"
+                          "1273399118131076596",
+                          "1068145992510000000"
                         ],
                         "balancesLiveScaled18": [
-                          "2285010783360894789224",
-                          "1026169185079119847399"
+                          "2270915530340569528849",
+                          "1040252909978996322009"
                         ],
                         "swapFee": "20000000000000",
                         "aggregateSwapFee": "500000000000000000",
@@ -662,16 +664,16 @@ Sample Response
                         "ampStartTime": "1769008895",
                         "ampStopTime": "1769212800",
                         "erc4626Rates": [
-                          "1038061086756000000",
-                          "1068142945570000000"
+                          "1038061261361000000",
+                          "1068145992510000000"
                         ],
                         "erc4626MaxDeposit": [
-                          "170141183460469147991267277926373703264",
-                          "170141183460469130561742956659940646565"
+                          "170141183460469147948298304428793086681",
+                          "170141183460469130573690143185856676150"
                         ],
                         "erc4626MaxMint": [
-                          "163902862395285458201283032707965059521",
-                          "159286904590916522830116655076324220979"
+                          "163902834826335191190600937384355534952",
+                          "159286450217034602666001948379913672396"
                         ]
                       }
                     },
@@ -684,18 +686,18 @@ Sample Response
                       },
                       "poolState": {
                         "poolType": "Buffer",
-                        "rate": "1068142945570000000",
+                        "rate": "1068145992510000000",
                         "poolAddress": "0x90551c1795392094fe6d29b758eccd233cfaa260",
                         "tokens": [
                           "0x90551c1795392094fe6d29b758eccd233cfaa260",
                           "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
                         ],
-                        "maxDeposit": "170141183460469130561742956659940646565",
-                        "maxMint": "159286904590916522830116655076324220979"
+                        "maxDeposit": "170141183460469130573690143185856676150",
+                        "maxMint": "159286450217034602666001948379913672396"
                       }
                     }
                   ],
-                  "gasUSD": "0.164403"
+                  "gasUSD": "0.130810"
                 }
               }
             ]
@@ -703,7 +705,7 @@ Sample Response
         ]
       }
     ],
-    "gasCostUSD": "0.192710",
+    "gasCostUSD": "0.153334",
     "gasCost": "331810",
     "side": "SELL",
     "version": "6.2",
@@ -711,11 +713,11 @@ Sample Response
     "tokenTransferProxy": "0x6a000f20005980200259b80c5102003040001068",
     "contractMethod": "swapExactAmountIn",
     "partnerFee": 0.01,
-    "srcUSD": "2479.8600000000",
-    "destUSD": "2479.6634690013",
+    "srcUSD": "2485.2000000000",
+    "destUSD": "2478.5802444364",
     "partner": "anon",
     "maxImpactReached": false,
-    "hmac": "0c22f7e589c5ee2fb35fd667763c474960540ee8"
+    "hmac": "c084f151d999fc3c50d0ef6c1262815486a4f4c7"
   }
 }
 ```
